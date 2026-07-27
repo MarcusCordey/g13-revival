@@ -1,0 +1,36 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Arduino IDE and local editor state
+.arduinoIDE/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Arduino and C/C++ build output
+build/
+build-*/
+*.o
+*.a
+*.d
+*.elf
+*.hex
+*.eep
+*.map
+*.lst
+*.sym
+*.dSYM/
+
+# Temporary and backup files
+*.tmp
+*.temp
+*.bak
+*.orig
+
+# Local logs
+*.log
+

@@ -1,0 +1,25 @@
+/*
+==============================================================================
+Teensy 4.1 Logitech G13 Adapter Project
+
+by Marcus Cordey
+
+Feel free to use, redistribute and/or edit.
+
+This project contains reverse-engineered Logitech G13 protocol handling,
+USB communication, key mapping and LCD support for Teensy 4.1.
+
+The code is intentionally documented to help other developers understand
+the protocol and implementation details.
+
+No warranty is provided. Use at your own risk.
+==============================================================================
+*/
+
+Version: 1.0.0
+Project: G13 Revival
+https://g13revival.de
+
+Provided as-is.
+No warranty.
+Community contributions welcome.
