@@ -49,10 +49,12 @@ SystemStatus systemStatus = STATUS_BOOTING;
 // Timestamp of the last valid incoming HID report from the G13.
 // This is a reverse-engineering aid and a runtime health indicator: as long as
 // reports continue to arrive, the USB host side is assumed to be alive.
-static uint32_t g13_last_report_ms = 0;
+static volatile uint32_t g13_last_report_ms = 0;
 
 // Latched flag to avoid printing repeated stall messages in the fast loop.
-static bool     g13_stall_reported = false;
+static volatile bool g13_stall_reported = false;
+static volatile bool g13_recovery_pending = false;
+static uint32_t g13_recovered_at = 0;
 
 // Timeout bewusst großzügig, damit kein Fehlalarm bei Idle
 // Practical-test note:
@@ -85,14 +87,15 @@ static inline void G13_Heartbeat() {
   g13_last_report_ms = now;
 
   if (g13_stall_reported) {
-    static uint32_t recovered_at = 0;
-    if (recovered_at == 0) recovered_at = now;
+    if (g13_recovered_at == 0) g13_recovered_at = now;
 
-    if (now - recovered_at > G13_RECOVER_GRACE_MS) {
-      if (Serial) Serial.println("[OK] G13 reports resumed.");
+    if (now - g13_recovered_at > G13_RECOVER_GRACE_MS) {
       g13_stall_reported = false;
-      recovered_at = 0;
+      g13_recovered_at = 0;
+      g13_recovery_pending = true;
     }
+  } else {
+    g13_recovered_at = 0;
   }
 }
 
@@ -112,16 +115,35 @@ static inline void G13_Heartbeat() {
 // runtime observation, not a confirmed Logitech protocol feature.
 // -----------------------------------------------------------------------------
 static inline void G13_Monitor() {
-  if (g13_last_report_ms == 0) return; // noch nie einen Report gesehen -> nicht alarmieren
+  const uint32_t now = millis();
+  uint32_t lastReportMs = 0;
+  bool reportStall = false;
+  bool reportRecovery = false;
 
-  uint32_t delta = millis() - g13_last_report_ms;
-  if (!g13_stall_reported && delta > G13_STALL_TIMEOUT_MS) {
+  const bool usbIrqWasEnabled = NVIC_IS_ENABLED(IRQ_USBHS);
+  NVIC_DISABLE_IRQ(IRQ_USBHS);
+  lastReportMs = g13_last_report_ms;
+  reportRecovery = g13_recovery_pending;
+  g13_recovery_pending = false;
+  if (lastReportMs != 0 &&
+      !g13_stall_reported &&
+      now - lastReportMs > G13_STALL_TIMEOUT_MS) {
+    g13_stall_reported = true;
+    reportStall = true;
+  }
+  if (usbIrqWasEnabled) {
+    NVIC_ENABLE_IRQ(IRQ_USBHS);
+  }
+
+  if (reportRecovery && Serial) {
+    Serial.println("[OK] G13 reports resumed.");
+  }
+  if (reportStall) {
     if (Serial) {
       Serial.println("[ERROR] G13 stall detected: no HID reports.");
       Serial.print("        ms_since_last_report=");
-      Serial.println(delta);
+      Serial.println(now - lastReportMs);
     }
-    g13_stall_reported = true;
   }
 }
 
@@ -130,6 +152,56 @@ static inline void G13_Monitor() {
 // The cache prevents repeated Keyboard.press()/release() calls while a key is
 // held and allows multiple simultaneous keys to be tracked independently.
 static bool g_pressed[32] = {false};  // Merker je G-Taste (1..22)
+static bool g_keyboard_pressed[32] = {false};
+static uint8_t g_keyboard_pressed_count = 0;
+
+// The selected Teensy USB keyboard profile exposes the standard six key slots.
+// Additional held G-keys remain in g_pressed and are sent as soon as a slot is
+// released, instead of being marked as transmitted when Keyboard.press() could
+// not represent them.
+static const uint8_t G13_KEYBOARD_ROLLOVER = 6;
+static const uint8_t G13_KEYCODE_BY_NUMBER[23] = {
+  0,
+  '1', '2', '3', '4', '5', '6', '7', 'k',
+  'l', 'a', 'w', 'd', 'm', 'n', 'o', 'p',
+  's', 'q', 'r', ' ', 'u', 't'
+};
+
+// Releases every keyboard code held by the Teensy and clears the desired and
+// transmitted per-G-key caches so reconnect starts from a known released state.
+static void releaseG13KeyboardState() {
+  Keyboard.releaseAll();
+  memset(g_pressed, 0, sizeof(g_pressed));
+  memset(g_keyboard_pressed, 0, sizeof(g_keyboard_pressed));
+  g_keyboard_pressed_count = 0;
+}
+
+static void pressPendingG13Keys() {
+  for (uint8_t gnum = 1;
+       gnum <= 22 && g_keyboard_pressed_count < G13_KEYBOARD_ROLLOVER;
+       gnum++) {
+    if (g_pressed[gnum] && !g_keyboard_pressed[gnum]) {
+      Keyboard.press(G13_KEYCODE_BY_NUMBER[gnum]);
+      g_keyboard_pressed[gnum] = true;
+      g_keyboard_pressed_count++;
+    }
+  }
+}
+
+static void updateG13Key(uint8_t gnum, bool nowPressed) {
+  if (gnum == 0 || gnum > 22 || nowPressed == g_pressed[gnum]) {
+    return;
+  }
+
+  g_pressed[gnum] = nowPressed;
+  if (!nowPressed && g_keyboard_pressed[gnum]) {
+    Keyboard.release(G13_KEYCODE_BY_NUMBER[gnum]);
+    g_keyboard_pressed[gnum] = false;
+    if (g_keyboard_pressed_count > 0) {
+      g_keyboard_pressed_count--;
+    }
+  }
+}
 
 // -----------------------------------------------------------------------------
 // Function: handle_g13_report
@@ -162,30 +234,15 @@ static bool g_pressed[32] = {false};  // Merker je G-Taste (1..22)
 // -----------------------------------------------------------------------------
 // Übersetzer: nimmt einen 8-Byte-Report und macht Keyboard-Events daraus
 void handle_g13_report(const uint8_t *d, uint32_t len) {
-  if (len < 8) return;
+  if (!d || len < 8) return;
 
-  // Wir filtern nur "unsere" bekannten Reports (Header 01 7f 7f)
+  // Only the confirmed G13 key report ID is decoded here. Bytes 1 and 2 carry
+  // joystick data and must not be treated as a fixed header.
   if (d[0] != 0x01) return;
 
   uint8_t b3 = d[3];
   uint8_t b4 = d[4];
   uint8_t b5 = d[5];
-
-  // Local helper:
-  // Converts a decoded G-key state into a USB keyboard state transition.
-  // It only emits a Keyboard event when the state changes, which keeps the
-  // USB device side stable during held keys and during key combinations.
-  auto updateKey = [&](int gnum, bool nowPressed, uint8_t keycode) {
-    bool before = g_pressed[gnum];
-    if (nowPressed && !before) {
-      g_pressed[gnum] = true;
-      Keyboard.press(keycode);
-    }
-    else if (!nowPressed && before) {
-      g_pressed[gnum] = false;
-      Keyboard.release(keycode);
-    }
-  };
 
   // Key mapping policy:
   // "bestehende Belegung" marks mappings that were already known to work.
@@ -193,24 +250,24 @@ void handle_g13_report(const uint8_t *d, uint32_t len) {
   // keys without changing the broader keyboard bridge architecture.
 
   // Byte 3: G1..G8
-  updateKey(1,  b3 & 0x01, '1');  // G1  -> '1'  (bestehende Belegung)
-  updateKey(2,  b3 & 0x02, '2');  // G2  -> '2'  (bestehende Belegung)
-  updateKey(3,  b3 & 0x04, '3');  // G3  -> '3'  (bestehende Belegung)
-  updateKey(4,  b3 & 0x08, '4');  // G4  -> '4'  (bestehende Belegung)
-  updateKey(5,  b3 & 0x10, '5');  // G5  -> '5'  (bestehende Belegung)
-  updateKey(6,  b3 & 0x20, '6');  // G6  -> '6'  (bestehende Belegung)
-  updateKey(7,  b3 & 0x40, '7');  // G7  -> '7'  (bestehende Belegung)
-  updateKey(8,  b3 & 0x80, 'k');  // G8  -> 'k'  (Testbelegung)
+  updateG13Key(1,  b3 & 0x01);  // G1  -> '1'  (bestehende Belegung)
+  updateG13Key(2,  b3 & 0x02);  // G2  -> '2'  (bestehende Belegung)
+  updateG13Key(3,  b3 & 0x04);  // G3  -> '3'  (bestehende Belegung)
+  updateG13Key(4,  b3 & 0x08);  // G4  -> '4'  (bestehende Belegung)
+  updateG13Key(5,  b3 & 0x10);  // G5  -> '5'  (bestehende Belegung)
+  updateG13Key(6,  b3 & 0x20);  // G6  -> '6'  (bestehende Belegung)
+  updateG13Key(7,  b3 & 0x40);  // G7  -> '7'  (bestehende Belegung)
+  updateG13Key(8,  b3 & 0x80);  // G8  -> 'k'  (Testbelegung)
 
   // Byte 4: G9..G16
-  updateKey(9,  b4 & 0x01, 'l');  // G9  -> 'l'  (Testbelegung)
-  updateKey(10, b4 & 0x02, 'a');  // G10 -> 'a'  (bestehende Belegung)
-  updateKey(11, b4 & 0x04, 'w');  // G11 -> 'w'  (bestehende Belegung)
-  updateKey(12, b4 & 0x08, 'd');  // G12 -> 'd'  (bestehende Belegung)
-  updateKey(13, b4 & 0x10, 'm');  // G13 -> 'm'  (Testbelegung)
-  updateKey(14, b4 & 0x20, 'n');  // G14 -> 'n'  (Testbelegung)
-  updateKey(15, b4 & 0x40, 'o');  // G15 -> 'o'  (Testbelegung)
-  updateKey(16, b4 & 0x80, 'p');  // G16 -> 'p'  (Testbelegung)
+  updateG13Key(9,  b4 & 0x01);  // G9  -> 'l'  (Testbelegung)
+  updateG13Key(10, b4 & 0x02);  // G10 -> 'a'  (bestehende Belegung)
+  updateG13Key(11, b4 & 0x04);  // G11 -> 'w'  (bestehende Belegung)
+  updateG13Key(12, b4 & 0x08);  // G12 -> 'd'  (bestehende Belegung)
+  updateG13Key(13, b4 & 0x10);  // G13 -> 'm'  (Testbelegung)
+  updateG13Key(14, b4 & 0x20);  // G14 -> 'n'  (Testbelegung)
+  updateG13Key(15, b4 & 0x40);  // G15 -> 'o'  (Testbelegung)
+  updateG13Key(16, b4 & 0x80);  // G16 -> 'p'  (Testbelegung)
 
   // Byte 5: Bits 0..5 = G17..G22, Bit 7 = Statusbit (LIGHT_STATE)
   bool g17_now = b5 & 0x01;
@@ -220,12 +277,17 @@ void handle_g13_report(const uint8_t *d, uint32_t len) {
   bool g21_now = b5 & 0x10;
   bool g22_now = b5 & 0x20;
 
-  updateKey(17, g17_now, 's');   // G17 -> 's'          (bestehende Belegung)
-  updateKey(18, g18_now, 'q');   // G18 -> 'q'          (Testbelegung)
-  updateKey(19, g19_now, 'r');   // G19 -> 'r'          (Testbelegung)
-  updateKey(20, g20_now, ' ');   // G20 -> Leertaste    (bestehende Belegung)
-  updateKey(21, g21_now, 'u');   // G21 -> 'u'          (Testbelegung)
-  updateKey(22, g22_now, 't');   // G22 -> 't'          (bestehende Belegung)
+  updateG13Key(17, g17_now);   // G17 -> 's'          (bestehende Belegung)
+  updateG13Key(18, g18_now);   // G18 -> 'q'          (Testbelegung)
+  updateG13Key(19, g19_now);   // G19 -> 'r'          (Testbelegung)
+  updateG13Key(20, g20_now);   // G20 -> Leertaste    (bestehende Belegung)
+  updateG13Key(21, g21_now);   // G21 -> 'u'          (Testbelegung)
+  updateG13Key(22, g22_now);   // G22 -> 't'          (bestehende Belegung)
+
+  // Promote pending keys only after every bit in this report has been applied.
+  // This avoids briefly pressing a pending key that was released in the same
+  // report in which another keyboard slot became free.
+  pressPendingG13Keys();
 }
 
 // ---------- USB-Host-Struktur (Schicht 1) ----------
@@ -254,9 +316,9 @@ USBHIDParser hid5(myusb);
 // decoder while preserving the proven HIDDumpController claim/parsing path.
 //
 // USB behavior:
-// claim_collection() delegates to HIDDumpController first. Only after a claim
-// succeeds is the optional LCD module allowed to attach to the same parser, and
-// only when LCD support is enabled and the parser exposes an OUT endpoint.
+// claim_collection() first verifies the exact G13 VID/PID and interface. Only
+// then does it delegate to HIDDumpController. After a successful claim, the
+// optional LCD module is notified about the same parser.
 //
 // Safety note:
 // The HID input callback remains the critical path. LCD support is guarded so
@@ -283,11 +345,20 @@ protected:
   // a side effect only when G13_LCD_ENABLE is enabled.
   // ---------------------------------------------------------------------------
   virtual hidclaim_t claim_collection(USBHIDParser *driver, Device_t *dev, uint32_t topusage) override {
+    const bool isG13Interface = driver &&
+                                dev &&
+                                dev->idVendor == 0x046d &&
+                                dev->idProduct == 0xc21c &&
+                                driver->interfaceNumber() == 0;
+    if (!isG13Interface) {
+      return CLAIM_NO;
+    }
+
     hidclaim_t claim = HIDDumpController::claim_collection(driver, dev, topusage);
 
 #if G13_LCD_ENABLE
     if (claim != CLAIM_NO && lcdCanAttachTo(driver)) {
-      lcdAttach(driver);
+      lcdQueueAttachEvent(driver);
     }
 #endif
 
@@ -304,14 +375,34 @@ protected:
   // class cleanup remains the authoritative HID disconnect handling.
   // ---------------------------------------------------------------------------
   virtual void disconnect_collection(Device_t *dev) override {
+    const bool isG13 = dev && dev->idVendor == 0x046d && dev->idProduct == 0xc21c;
+
 #if G13_LCD_ENABLE
-    if (dev && dev->idVendor == 0x046d && dev->idProduct == 0xc21c) {
-      lcdDetach();
+    if (isG13) {
+      lcdQueueDetachEvent();
     }
 #endif
 
+    if (isG13) {
+      releaseG13KeyboardState();
+      g13_last_report_ms = 0;
+      g13_stall_reported = false;
+      g13_recovery_pending = false;
+      g13_recovered_at = 0;
+    }
+
     HIDDumpController::disconnect_collection(dev);
   }
+
+#if G13_LCD_ENABLE
+  virtual bool hid_process_control(const Transfer_t *transfer) override {
+    return lcdQueueControlCompleteEvent(transfer);
+  }
+
+  virtual bool hid_process_out_data(const Transfer_t *transfer) override {
+    return lcdQueueOutCompleteEvent(transfer);
+  }
+#endif
 
   // Diese Funktion wird bei jedem eingehenden HID-Report aufgerufen
   // ---------------------------------------------------------------------------
@@ -330,11 +421,16 @@ protected:
   // This method must not block. It is the path that keeps keyboard input stable.
   // ---------------------------------------------------------------------------
   virtual bool hid_process_in_data(const Transfer_t *transfer) override {
-    // NEU: Heartbeat -> wir wissen sicher: ein Report kam an
+    if (!transfer || !transfer->buffer) {
+      return true;
+    }
+
+    // Heartbeat: a valid transfer reached the confirmed G13 bridge.
     G13_Heartbeat();
 
-    // Erst die normale Dump-Logik laufen lassen (wie das Original-Beispiel)
-    HIDDumpController::hid_process_in_data(transfer);
+    // Keep optional PJRC diagnostics available without enabling them by default.
+    const bool diagnosticsHandled =
+      HIDDumpController::hid_process_in_data(transfer);
 
     const uint8_t *data = (const uint8_t *)transfer->buffer;
     uint32_t len = transfer->length;
@@ -342,7 +438,7 @@ protected:
     // Unsere Übersetzer-Routine aufrufen
     handle_g13_report(data, len);
 
-    return true;
+    return diagnosticsHandled;
   }
 };
 

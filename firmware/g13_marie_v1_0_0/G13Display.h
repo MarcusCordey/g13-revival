@@ -31,8 +31,8 @@ No warranty is provided. Use at your own risk.
 // Design notes:
 // - All functions are non-blocking from the caller's perspective.
 // - updateDisplay() must be called regularly from loop().
-// - lcdAttach()/lcdDetach() are called from the HID claim/disconnect path only
-//   when G13_LCD_ENABLE is enabled.
+// - The HID callbacks only enqueue attach/detach and transfer-completion events.
+//   updateDisplay() applies all LCD state changes from the main loop.
 // - When LCD support is compiled out, these functions become safe no-op stubs.
 // -----------------------------------------------------------------------------
 
@@ -40,9 +40,12 @@ No warranty is provided. Use at your own risk.
 // endpoint suitable for LCD transfers.
 bool lcdCanAttachTo(USBHIDParser *driver);
 
-// Attach/detach the LCD state machine to the verified G13 HID parser.
-void lcdAttach(USBHIDParser *driver);
-void lcdDetach();
+// Queue events from the USBHost_t36 callback context. These functions only
+// capture event data; they do not mutate the LCD state machine.
+void lcdQueueAttachEvent(USBHIDParser *driver);
+void lcdQueueDetachEvent();
+bool lcdQueueControlCompleteEvent(const Transfer_t *transfer);
+bool lcdQueueOutCompleteEvent(const Transfer_t *transfer);
 
 // High-level LCD drawing API. The framebuffer is local until lcdUpdate() marks
 // it for transfer.

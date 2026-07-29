@@ -21,8 +21,8 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 */
 #include "HIDDumper.h"
-bool HIDDumpController::show_raw_data = true;
-bool HIDDumpController::show_formated_data = true;
+bool HIDDumpController::show_raw_data = false;
+bool HIDDumpController::show_formated_data = false;
 bool HIDDumpController::changed_data_only = false;
 
 // -----------------------------------------------------------------------------
@@ -75,11 +75,20 @@ void HIDDumpController::init() {
 }
 
 hidclaim_t HIDDumpController::claim_collection(USBHIDParser *driver, Device_t *dev, uint32_t topusage) {
+  if (!driver || !dev) {
+    return CLAIM_NO;
+  }
+
   // only claim RAWHID devices currently: 16c0:0486
   Serial.printf("HIDDumpController(%u : %p : %p) Claim: %x:%x usage: %x", index_, this, driver, dev->idVendor, dev->idProduct, topusage);
   Serial.printf(" SubClass: %x Protocol: %x",  driver->interfaceSubClass(), driver->interfaceProtocol());
   if (mydevice != NULL && dev != mydevice) {
     Serial.println("- NO (Device)");
+    logG13HidClaim(driver, dev, topusage, CLAIM_NO, this);
+    return CLAIM_NO;
+  }
+  if (fixed_usage_ && fixed_usage_ != topusage) {
+    Serial.printf(" - NO (Fixed Usage: %x)\n", fixed_usage_);
     logG13HidClaim(driver, dev, topusage, CLAIM_NO, this);
     return CLAIM_NO;
   }
@@ -95,7 +104,6 @@ hidclaim_t HIDDumpController::claim_collection(USBHIDParser *driver, Device_t *d
   mydevice = dev;
   collections_claimed++;
   usage_ = topusage;
-  driver_ = driver;  // remember the driver.
   Serial.println(" - Yes");
 
   // if Boot Mouse - then set idle
@@ -113,7 +121,11 @@ hidclaim_t HIDDumpController::claim_collection(USBHIDParser *driver, Device_t *d
 }
 
 void HIDDumpController::disconnect_collection(Device_t *dev) {
-  if (--collections_claimed == 0) {
+  (void)dev;
+  if (collections_claimed > 0) {
+    collections_claimed--;
+  }
+  if (collections_claimed == 0) {
     mydevice = NULL;
     usage_ = 0;
   }
@@ -138,6 +150,14 @@ void dump_hexbytes(const void *ptr, uint32_t len, uint32_t indent) {
 }
 
 bool HIDDumpController::hid_process_in_data(const Transfer_t *transfer) {
+  if (!transfer) {
+    return true;
+  }
+
+  if (!show_raw_data && !show_formated_data) {
+    return true;
+  }
+
   // return true if we are not showing formated data...
   hid_input_begin_level_ = 0;     // always make sure we reset to 0
   count_usages_ = index_usages_;  // remember how many we output for this one
@@ -208,7 +228,7 @@ void HIDDumpController::hid_input_data(uint32_t usage, int32_t value) {
   }
 }
 
-void HIDDumpController::printUsageInfo(uint8_t usage_page, uint16_t usage) {
+void HIDDumpController::printUsageInfo(uint16_t usage_page, uint16_t usage) {
   switch (usage_page) {
     case 1:  // Generic Desktop control:
       switch (usage) {
@@ -255,7 +275,7 @@ void HIDDumpController::printUsageInfo(uint8_t usage_page, uint16_t usage) {
         case 0x23: Serial.print("(Discover Wireless Ctrl)"); break;
         case 0x24: Serial.print("(Security Code Entered)"); break;
         case 0x25: Serial.print("(Security Code erase)"); break;
-        case 0x26: Serial.print("(Security Code cleared)");
+        case 0x26: Serial.print("(Security Code cleared)"); break;
         default: Serial.print("(?)"); break;
       }
       break;
@@ -701,14 +721,23 @@ void HIDDumpController::printUsageInfo(uint8_t usage_page, uint16_t usage) {
 void HIDDumpController::hid_input_end() {
   // Lets do simplified data for changed only
   if (changed_data_only) return;
-  hid_input_begin_level_--;
+  if (hid_input_begin_level_ > 0) {
+    hid_input_begin_level_--;
+  }
   indent_level(hid_input_begin_level_);
   Serial.println("END:");
 }
 
 void HIDDumpController::dumpHIDReportDescriptor(USBHIDParser *phidp) {
+  if (!phidp) {
+    return;
+  }
+
   const uint8_t *p = phidp->getHIDReportDescriptor();
   uint16_t report_size = phidp->getHIDReportDescriptorSize();
+  if (!p || report_size == 0) {
+    return;
+  }
   const uint8_t *pend = p + report_size;
   uint8_t collection_level = 0;
   uint16_t usage_page = 0;
@@ -716,8 +745,6 @@ void HIDDumpController::dumpHIDReportDescriptor(USBHIDParser *phidp) {
   uint16_t usage[USAGE_LIST_LEN] = { 0, 0 };
   uint8_t usage_count = 0;
   uint32_t topusage;
-  cnt_feature_reports_ = 0;
-  uint8_t last_report_id = 0;
   Serial.printf("\nHID Report Descriptor (%p) size: %u\n", p, report_size);
   while (p < pend) {
     uint8_t tag = *p;
@@ -725,9 +752,26 @@ void HIDDumpController::dumpHIDReportDescriptor(USBHIDParser *phidp) {
     Serial.printf("  %02X", tag);
 
     if (tag == 0xFE) {  // Long Item (unsupported)
-      p += p[1] + 3;
+      if ((uint32_t)(pend - p) < 3) {
+        Serial.println("\t// Truncated long item");
+        break;
+      }
+      const uint16_t itemLength = (uint16_t)p[1] + 3;
+      if ((uint32_t)(pend - p) < itemLength) {
+        Serial.println("\t// Truncated long item data");
+        break;
+      }
+      p += itemLength;
       continue;
     }
+
+    static const uint8_t SHORT_ITEM_DATA_LENGTH[4] = {0, 1, 2, 4};
+    const uint8_t dataLength = SHORT_ITEM_DATA_LENGTH[tag & 0x03];
+    if ((uint32_t)(pend - p) < (uint32_t)dataLength + 1) {
+      Serial.println("\t// Truncated short item");
+      break;
+    }
+
     uint32_t val;
     switch (tag & 0x03) {  // Short Item data
       case 0:
@@ -751,8 +795,6 @@ void HIDDumpController::dumpHIDReportDescriptor(USBHIDParser *phidp) {
         p += 5;
         break;
     }
-    if (p > pend) break;
-
     bool reset_local = false;
     switch (tag & 0xfc) {
       case 0x4:  //usage Page
@@ -800,7 +842,6 @@ void HIDDumpController::dumpHIDReportDescriptor(USBHIDParser *phidp) {
         break;
       case 0x84:  // Report ID (global)
         Serial.printf("\t// Report ID(%x)", val);
-        last_report_id = val;
         break;
       case 0x18:  // Usage Minimum (local)
         usage[0] = val;
@@ -820,8 +861,8 @@ void HIDDumpController::dumpHIDReportDescriptor(USBHIDParser *phidp) {
         if (collection_level == 0) {
           topusage = ((uint32_t)usage_page << 16) | usage[0];
           Serial.printf(" top Usage(%x)", topusage);
-          collection_level++;
         }
+        if (collection_level < UINT8_MAX) collection_level++;
         reset_local = true;
         break;
       case 0xC0:  // End Collection
@@ -842,9 +883,6 @@ void HIDDumpController::dumpHIDReportDescriptor(USBHIDParser *phidp) {
       case 0xB0:  // Feature
         Serial.printf("\t// Feature(%x)\t// (", val);
         print_input_output_feature_bits(val);
-        if (cnt_feature_reports_ < MAX_FEATURE_REPORTS) {
-          feature_report_ids_[cnt_feature_reports_++] = last_report_id;
-        }
         reset_local = true;
         break;
 
@@ -871,7 +909,7 @@ void HIDDumpController::dumpHIDReportDescriptor(USBHIDParser *phidp) {
   }
 }
 
-void HIDDumpController::print_input_output_feature_bits(uint8_t val) {
+void HIDDumpController::print_input_output_feature_bits(uint32_t val) {
   Serial.print((val & 0x01)? "Constant" : "Data");  
   Serial.print((val & 0x02)? ", Variable" : ", Array");  
   Serial.print((val & 0x04)? ", Relative" : ", Absolute");  

@@ -4,7 +4,7 @@ Contributions are welcome after the repository is opened for collaboration.
 
 ## Priorities
 
-The tested `v1.0.0` firmware is the stability baseline. Changes must preserve
+The tested `v1.1.0` firmware is the stability baseline. Changes must preserve
 reliable G13-to-keyboard operation. LCD or lighting work must not compromise
 the HID input path.
 
@@ -35,4 +35,3 @@ the HID input path.
   serial numbers.
 - Do not commit compiled firmware, Arduino build directories, IDE caches,
   `.DS_Store` files or local backup archives.
-

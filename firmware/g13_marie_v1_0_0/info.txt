@@ -16,7 +16,7 @@ No warranty is provided. Use at your own risk.
 ==============================================================================
 */
 
-Version: 1.0.0
+Version: 1.1.0
 Project: G13 Revival
 https://g13revival.de
 

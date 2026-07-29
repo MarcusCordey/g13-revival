@@ -17,10 +17,15 @@ No warranty is provided. Use at your own risk.
 */
 
 #include "G13Display.h"
+#include "G13StartupAnimation.h"
 
 #if G13_LCD_ENABLE
 
+#if !G13_LCD_ANIMATION_ENABLE && \
+    !G13_LCD_PERMANENT_FRAME_ENABLE && \
+    G13_LCD_STATIC_FALLBACK_ENABLE
 #include "logo_g13_m2.h"
+#endif
 #include <string.h>
 
 // -----------------------------------------------------------------------------
@@ -60,8 +65,12 @@ static const uint16_t LCD_TRANSFER_SIZE = LCD_TRANSFER_HEADER_SIZE + LCD_FRAMEBU
 // gewuenschte blaue Hintergrundwirkung bleibt das Logo invertiert (weisse
 // Logopixel), und der sonst schwarze Grafikhintergrund wird leicht gedithert,
 // damit die blaue Beleuchtung optisch durchwirken kann.
+#if !G13_LCD_ANIMATION_ENABLE && \
+    !G13_LCD_PERMANENT_FRAME_ENABLE && \
+    G13_LCD_STATIC_FALLBACK_ENABLE
 static const bool LCD_INVERT_LOGO_FOR_WHITE_ON_BLACK = true;
 static const bool LCD_DITHER_LOGO_BACKGROUND_FOR_BACKLIGHT = true;
+#endif
 static const uint8_t LCD_BACKLIGHT_BLUE_R = 0;
 static const uint8_t LCD_BACKLIGHT_BLUE_G = 0;
 static const uint8_t LCD_BACKLIGHT_BLUE_B = 255;
@@ -70,6 +79,22 @@ static const uint8_t LCD_BACKLIGHT_BLUE_B = 255;
 // It is only set after lcdCanAttachTo() confirms a G13 parser with an OUT
 // endpoint. Keeping this pointer null disables all LCD transfers.
 static USBHIDParser *lcdDriver = nullptr;
+static uint16_t lcdDriverOutSize = 0;
+static uint8_t lcdDriverInterface = 0;
+static uint32_t lcdConnectionGeneration = 0;
+
+// USBHost_t36 invokes HID callbacks from the USBHS interrupt. Callbacks only
+// publish events here. updateDisplay() consumes them with IRQ_USBHS masked
+// briefly, then performs all actual state-machine changes in the main loop.
+static USBHIDParser *volatile pendingLcdAttachDriver = nullptr;
+static volatile bool pendingLcdDetach = false;
+static volatile uint16_t pendingLcdAttachOutSize = 0;
+static volatile uint8_t pendingLcdAttachInterface = 0;
+static volatile uint32_t pendingLcdConnectionGeneration = 0;
+static volatile uint8_t pendingControlCompletion = 0;
+static volatile uint16_t pendingOutCompletionLength = 0;
+static volatile uint32_t pendingControlCompletionGeneration = 0;
+static volatile uint32_t pendingOutCompletionGeneration = 0;
 
 // Framebuffer storage:
 // lcdFramebuffer is the logical 160x48 monochrome image.
@@ -91,45 +116,69 @@ static uint8_t backlightPacket[5] __attribute__((aligned(32))) = {5, 0, 0, 0, 0}
 static bool lcdDirty = false;
 static bool lcdOnlineLogged = false;
 static bool lcdErrorLogged = false;
+static bool backlightErrorLogged = false;
 static bool lcdNoDriverLogged = false;
 static bool lcdDisabledLogged = false;
-static bool lcdInitSentLogged = false;
-static bool lcdFrameQueuedLogged = false;
-static uint32_t lcdLastAttemptMs = 0;
 static uint32_t lcdFrameStartMs = 0;
 static uint16_t lcdTransferOffset = 0;
 static bool lcdTransferActive = false;
+static const uint8_t *lcdPendingNativeFrame = nullptr;
+static bool lcdAnimationFrameInFlight = false;
+static bool lcdOutTransferPending = false;
+static uint16_t lcdOutPendingLength = 0;
+static uint32_t lcdOutTransferStartedMs = 0;
+static uint32_t lcdOutNextAttemptMs = 0;
+static uint8_t lcdOutAttemptCount = 0;
 
 // Backlight state cache. The driver only sends a lighting report when the
 // requested RGB value changes, preventing repeated control transfers in loop().
 static uint8_t currentBacklightRed = 0;
 static uint8_t currentBacklightGreen = 0;
 static uint8_t currentBacklightBlue = 0;
-static uint8_t pendingBacklightRed = 0;
-static uint8_t pendingBacklightGreen = 0;
-static uint8_t pendingBacklightBlue = 0;
+static uint8_t pendingBacklightRed = LCD_BACKLIGHT_BLUE_R;
+static uint8_t pendingBacklightGreen = LCD_BACKLIGHT_BLUE_G;
+static uint8_t pendingBacklightBlue = LCD_BACKLIGHT_BLUE_B;
 static bool currentBacklightValid = false;
 static bool backlightPending = false;
-static uint32_t backlightLastAttemptMs = 0;
+
+enum LcdControlTransferType : uint8_t {
+  LCD_CONTROL_NONE,
+  LCD_CONTROL_INIT,
+  LCD_CONTROL_BACKLIGHT
+};
+
+static LcdControlTransferType lcdControlPending = LCD_CONTROL_NONE;
+static uint32_t lcdControlTransferStartedMs = 0;
+static uint32_t lcdControlNextAttemptMs = 0;
+static uint8_t lcdControlAttemptCount = 0;
+static uint8_t lcdControlBacklightRed = 0;
+static uint8_t lcdControlBacklightGreen = 0;
+static uint8_t lcdControlBacklightBlue = 0;
 
 // -----------------------------------------------------------------------------
 // LcdBootState
 // Purpose:
-// Non-blocking LCD startup and single-frame transfer state machine.
+// Non-blocking LCD startup and frame-transfer state machine.
 //
 // Flow:
 // WAIT_DRIVER        - no suitable USBHIDParser is attached
 // WAIT_STABLE_CLAIM  - parser was found; wait briefly before LCD init
 // SEND_INIT          - queue the LCD init control transfer
+// WAIT_INIT          - wait for confirmed init transfer completion
+// SEND_BACKLIGHT     - queue the initial lighting control transfer
+// WAIT_BACKLIGHT     - wait for confirmed lighting transfer completion
 // INIT_SETTLE        - allow the device to settle before bitmap transfer
-// SEND_SPLASH        - send the prepared logo frame in endpoint-sized chunks
-// READY              - logo transfer completed; no resend loop
+// SEND_SPLASH        - send one prepared startup frame in endpoint-sized chunks
+// READY              - wait for the next due animation frame or later update
 // ERROR              - LCD disabled after an error; HID continues to run
 // -----------------------------------------------------------------------------
 enum LcdBootState {
   LCD_WAIT_DRIVER,
   LCD_WAIT_STABLE_CLAIM,
   LCD_SEND_INIT,
+  LCD_WAIT_INIT,
+  LCD_SEND_BACKLIGHT,
+  LCD_WAIT_BACKLIGHT,
   LCD_INIT_SETTLE,
   LCD_SEND_SPLASH,
   LCD_READY,
@@ -139,7 +188,6 @@ enum LcdBootState {
 static LcdBootState lcdBootState = LCD_WAIT_DRIVER;
 static uint32_t lcdStateSinceMs = 0;
 static bool lcdDisabledUntilDetach = false;
-static bool lcdDisabledForSession = false;
 
 // Timing constants:
 // These are not delay() calls. They gate state-machine transitions while the
@@ -147,7 +195,10 @@ static bool lcdDisabledForSession = false;
 static const uint32_t LCD_STABLE_CLAIM_MS = 1000;
 static const uint32_t LCD_CHUNK_INTERVAL_MS = 2;
 static const uint32_t LCD_TRANSFER_TIMEOUT_MS = 2500;
-static const uint32_t LCD_RECONNECT_GUARD_MS = 5000;
+static const uint32_t LCD_CONTROL_TIMEOUT_MS = 500;
+static const uint32_t LCD_OUT_TIMEOUT_MS = 250;
+static const uint32_t LCD_RETRY_BACKOFF_MS = 100;
+static const uint8_t LCD_MAX_TRANSFER_ATTEMPTS = 3;
 
 // -----------------------------------------------------------------------------
 // Function: logEvent
@@ -215,9 +266,9 @@ static void logDisabledOnce() {
 // is handled by lcdCanAttachTo() during attachment.
 // -----------------------------------------------------------------------------
 static bool driverLooksLikeG13() {
-  return lcdDriver &&
-         lcdDriver->idVendor() == G13_VENDOR_ID &&
-         lcdDriver->idProduct() == G13_PRODUCT_ID;
+  return lcdDriver != nullptr &&
+         lcdDriverInterface == 0 &&
+         lcdDriverOutSize > 0;
 }
 
 // -----------------------------------------------------------------------------
@@ -240,8 +291,14 @@ static void noteLcdError() {
   }
   lcdDirty = false;
   lcdTransferActive = false;
+  lcdPendingNativeFrame = nullptr;
+  lcdAnimationFrameInFlight = false;
+  lcdOutTransferPending = false;
+  lcdControlPending = LCD_CONTROL_NONE;
   backlightPending = false;
+  currentBacklightValid = false;
   lcdDriver = nullptr;
+  lcdDriverOutSize = 0;
   lcdDisabledUntilDetach = true;
   lcdBootState = LCD_ERROR;
   logDisabledOnce();
@@ -275,6 +332,9 @@ static void lcdSetPixel(int x, int y, bool on) {
   }
 }
 
+#if !G13_LCD_ANIMATION_ENABLE && \
+    !G13_LCD_PERMANENT_FRAME_ENABLE && \
+    G13_LCD_STATIC_FALLBACK_ENABLE
 // -----------------------------------------------------------------------------
 // Function: lcdInvertFramebuffer
 // Purpose:
@@ -316,6 +376,7 @@ static void lcdDitherInactiveBackground() {
     }
   }
 }
+#endif
 
 // -----------------------------------------------------------------------------
 // Function: queueBacklightColor
@@ -429,19 +490,101 @@ static const uint8_t *fontColumns(char c) {
 // Uses lcdFramebuffer/lcdTransferFrame and the attached USBHIDParser.
 //
 // Output:
-// Returns true once the full 992-byte payload has been queued.
+// Returns true once completion callbacks confirmed the full 992-byte payload.
 //
 // USB detail:
 // USBHIDParser::sendPacket() copies data into internal buffers sized by the OUT
 // endpoint. Sending the full 992-byte frame in one call can overflow that
-// internal buffer, so this function limits each call to lcdDriver->outSize().
+// internal buffer, so this function limits each call to the cached outSize().
 //
 // Safety:
 // A timeout disables LCD rather than risking repeated transfers. HID input is
 // expected to continue because the LCD state machine is independent.
 // -----------------------------------------------------------------------------
+static bool deadlineReached(uint32_t now, uint32_t deadline) {
+  return (int32_t)(now - deadline) >= 0;
+}
+
+static void finishBacklightFailure(const char *message) {
+  if (!backlightErrorLogged) {
+    logEvent(message);
+    backlightErrorLogged = true;
+  }
+  lcdControlPending = LCD_CONTROL_NONE;
+  lcdControlAttemptCount = 0;
+  backlightPending = false;
+  currentBacklightValid = false;
+
+  // Lighting is not allowed to prevent the independently working LCD bitmap
+  // path from starting.
+  if (lcdBootState == LCD_SEND_BACKLIGHT ||
+      lcdBootState == LCD_WAIT_BACKLIGHT) {
+    lcdBootState = LCD_INIT_SETTLE;
+    lcdStateSinceMs = millis();
+  }
+}
+
+static bool queueControlTransfer(LcdControlTransferType type) {
+  if (lcdControlPending != LCD_CONTROL_NONE || !driverLooksLikeG13()) {
+    return false;
+  }
+
+  const uint32_t now = millis();
+  if (!deadlineReached(now, lcdControlNextAttemptMs)) {
+    return false;
+  }
+
+  if (type == LCD_CONTROL_BACKLIGHT) {
+    backlightPacket[0] = 5;
+    backlightPacket[1] = pendingBacklightRed;
+    backlightPacket[2] = pendingBacklightGreen;
+    backlightPacket[3] = pendingBacklightBlue;
+    backlightPacket[4] = 0;
+    lcdControlBacklightRed = pendingBacklightRed;
+    lcdControlBacklightGreen = pendingBacklightGreen;
+    lcdControlBacklightBlue = pendingBacklightBlue;
+  }
+
+  lcdControlAttemptCount++;
+  lcdControlPending = type;
+  lcdControlTransferStartedMs = now;
+
+  bool queued = false;
+  const bool usbIrqWasEnabled = NVIC_IS_ENABLED(IRQ_USBHS);
+  NVIC_DISABLE_IRQ(IRQ_USBHS);
+  USBHIDParser *driver = lcdDriver;
+  if (driver && !pendingLcdDetach) {
+    if (type == LCD_CONTROL_INIT) {
+      queued = driver->sendControlPacket(0x00, 0x09, 0x0001, 0x0000, 0, nullptr);
+    } else {
+      queued = driver->sendControlPacket(0x21, 0x09, 0x0307, 0x0000,
+                                         sizeof(backlightPacket), backlightPacket);
+    }
+  }
+  if (usbIrqWasEnabled) {
+    NVIC_ENABLE_IRQ(IRQ_USBHS);
+  }
+
+  if (queued) {
+    return true;
+  }
+
+  lcdControlPending = LCD_CONTROL_NONE;
+  if (lcdControlAttemptCount >= LCD_MAX_TRANSFER_ATTEMPTS) {
+    if (type == LCD_CONTROL_INIT) {
+      logEvent("[G13] LCD init queue error");
+      noteLcdError();
+    } else {
+      finishBacklightFailure("[G13] Backlight queue error");
+    }
+  } else {
+    lcdControlNextAttemptMs = now + LCD_RETRY_BACKOFF_MS * lcdControlAttemptCount;
+  }
+  return false;
+}
+
 static bool sendPendingLcdFrame() {
-  if (lcdDisabledUntilDetach || lcdDisabledForSession) {
+  if (lcdDisabledUntilDetach) {
     logDisabledOnce();
     return false;
   }
@@ -455,26 +598,27 @@ static bool sendPendingLcdFrame() {
     return false;
   }
 
-  const uint16_t chunkSize = lcdDriver->outSize();
-  if (chunkSize == 0) {
-    logNoDriverOnce();
-    return false;
-  }
-
+  const uint16_t chunkSize = lcdDriverOutSize;
   const uint32_t now = millis();
 
   if (!lcdTransferActive) {
     memset(lcdTransferFrame, 0, LCD_TRANSFER_HEADER_SIZE);
     lcdTransferFrame[0] = 0x03;
+    const uint8_t *sourceFrame = lcdPendingNativeFrame
+      ? lcdPendingNativeFrame
+      : lcdFramebuffer;
     memcpy(lcdTransferFrame + LCD_TRANSFER_HEADER_SIZE,
-           lcdFramebuffer,
+           sourceFrame,
            LCD_FRAMEBUFFER_SIZE);
 
     lcdTransferOffset = 0;
     lcdFrameStartMs = now;
     lcdTransferActive = true;
+    lcdOutTransferPending = false;
+    lcdOutAttemptCount = 0;
+    lcdOutNextAttemptMs = now;
+    lcdPendingNativeFrame = nullptr;
     lcdDirty = false;
-
   }
 
   if (now - lcdFrameStartMs > LCD_TRANSFER_TIMEOUT_MS) {
@@ -482,25 +626,41 @@ static bool sendPendingLcdFrame() {
     return false;
   }
 
-  if (now - lcdLastAttemptMs < LCD_CHUNK_INTERVAL_MS) {
-    return false;
-  }
-  lcdLastAttemptMs = now;
-
-  uint16_t remaining = LCD_TRANSFER_SIZE - lcdTransferOffset;
-  uint16_t bytesToSend = (remaining < chunkSize) ? remaining : chunkSize;
-
-  if (lcdDriver->sendPacket(lcdTransferFrame + lcdTransferOffset, bytesToSend)) {
-    if (!lcdFrameQueuedLogged) {
-      logEvent("[G13] LCD frame queued");
-      lcdFrameQueuedLogged = true;
-    }
-    lcdTransferOffset += bytesToSend;
-  }
-
   if (lcdTransferOffset >= LCD_TRANSFER_SIZE) {
     lcdTransferActive = false;
     return true;
+  }
+
+  if (lcdOutTransferPending || !deadlineReached(now, lcdOutNextAttemptMs)) {
+    return false;
+  }
+
+  const uint16_t remaining = LCD_TRANSFER_SIZE - lcdTransferOffset;
+  const uint16_t bytesToSend = (remaining < chunkSize) ? remaining : chunkSize;
+  lcdOutAttemptCount++;
+  lcdOutPendingLength = bytesToSend;
+  lcdOutTransferPending = true;
+  lcdOutTransferStartedMs = now;
+
+  bool queued = false;
+  const bool usbIrqWasEnabled = NVIC_IS_ENABLED(IRQ_USBHS);
+  NVIC_DISABLE_IRQ(IRQ_USBHS);
+  USBHIDParser *driver = lcdDriver;
+  if (driver && !pendingLcdDetach) {
+    queued = driver->sendPacket(lcdTransferFrame + lcdTransferOffset, bytesToSend);
+  }
+  if (usbIrqWasEnabled) {
+    NVIC_ENABLE_IRQ(IRQ_USBHS);
+  }
+
+  if (!queued) {
+    lcdOutTransferPending = false;
+    if (lcdOutAttemptCount >= LCD_MAX_TRANSFER_ATTEMPTS) {
+      logEvent("[G13] LCD OUT queue error");
+      noteLcdError();
+    } else {
+      lcdOutNextAttemptMs = now + LCD_RETRY_BACKOFF_MS * lcdOutAttemptCount;
+    }
   }
 
   return false;
@@ -523,34 +683,12 @@ static bool sendPendingLcdFrame() {
 // every G13 unit may be global/key backlight rather than LCD-only lighting.
 // -----------------------------------------------------------------------------
 static void serviceBacklight() {
-  if (!backlightPending || !driverLooksLikeG13()) {
+  if (!backlightPending ||
+      !driverLooksLikeG13() ||
+      lcdControlPending != LCD_CONTROL_NONE) {
     return;
   }
-
-  const uint32_t now = millis();
-  if (now - backlightLastAttemptMs < 50) {
-    return;
-  }
-  backlightLastAttemptMs = now;
-
-  // Bekannter G13-Report aus g13-master::SetKeyColor():
-  // SET_REPORT 0x0307 an Interface 0 mit Payload {5, R, G, B, 0}.
-  // Je nach Firmware kann dies die globale/key backlight-Farbe sein; ob die
-  // LCD-Hintergrundbeleuchtung separat steuerbar ist, muss am G13 validiert werden.
-  backlightPacket[0] = 5;
-  backlightPacket[1] = pendingBacklightRed;
-  backlightPacket[2] = pendingBacklightGreen;
-  backlightPacket[3] = pendingBacklightBlue;
-  backlightPacket[4] = 0;
-
-  if (lcdDriver->sendControlPacket(0x21, 0x09, 0x0307, 0x0000, sizeof(backlightPacket), backlightPacket)) {
-    currentBacklightRed = pendingBacklightRed;
-    currentBacklightGreen = pendingBacklightGreen;
-    currentBacklightBlue = pendingBacklightBlue;
-    currentBacklightValid = true;
-    backlightPending = false;
-    logEvent("[G13] Backlight updated");
-  }
+  queueControlTransfer(LCD_CONTROL_BACKLIGHT);
 }
 
 // -----------------------------------------------------------------------------
@@ -580,7 +718,7 @@ bool lcdCanAttachTo(USBHIDParser *driver) {
 }
 
 // -----------------------------------------------------------------------------
-// Function: lcdAttach
+// Function: applyLcdAttach
 // Purpose:
 // Attaches the LCD state machine to a verified G13 HID parser.
 //
@@ -591,22 +729,15 @@ bool lcdCanAttachTo(USBHIDParser *driver) {
 // Initializes LCD state variables and waits for a stable claim before sending
 // any display traffic.
 //
-// Safety:
-// If a previous LCD transfer destabilized the session, lcdDisabledForSession
-// prevents reattachment until reboot.
 // -----------------------------------------------------------------------------
-void lcdAttach(USBHIDParser *driver) {
-  if (lcdDisabledForSession) {
-    logDisabledOnce();
-    return;
-  }
-
+static void applyLcdAttach(USBHIDParser *driver, uint8_t interfaceNumber,
+                           uint16_t outSize, uint32_t generation) {
   if (lcdDisabledUntilDetach) {
     logDisabledOnce();
     return;
   }
 
-  if (!lcdCanAttachTo(driver)) {
+  if (!driver || interfaceNumber != 0 || outSize == 0) {
     return;
   }
 
@@ -615,61 +746,239 @@ void lcdAttach(USBHIDParser *driver) {
   }
 
   lcdDriver = driver;
+  lcdDriverInterface = interfaceNumber;
+  lcdDriverOutSize = outSize;
+  lcdConnectionGeneration = generation;
   lcdBootState = LCD_WAIT_STABLE_CLAIM;
   lcdStateSinceMs = millis();
   lcdFrameStartMs = 0;
   lcdTransferOffset = 0;
   lcdTransferActive = false;
+  lcdPendingNativeFrame = nullptr;
+  lcdAnimationFrameInFlight = false;
+  lcdOutTransferPending = false;
+  lcdOutAttemptCount = 0;
+  lcdControlPending = LCD_CONTROL_NONE;
+  lcdControlAttemptCount = 0;
+  lcdControlNextAttemptMs = 0;
   lcdOnlineLogged = false;
   lcdErrorLogged = false;
+  backlightErrorLogged = false;
   lcdNoDriverLogged = false;
   lcdDisabledLogged = false;
-  lcdInitSentLogged = false;
-  lcdFrameQueuedLogged = false;
+  currentBacklightValid = false;
+  backlightPending = false;
   lcdDirty = false;
+  g13StartupAnimationReset();
   lcdClear();
   if (Serial) {
     Serial.printf("[G13] LCD attach parser=%p iface=%u outSize=%u\n",
                   (void *)driver,
-                  driver->interfaceNumber(),
-                  driver->outSize());
+                  interfaceNumber,
+                  outSize);
   }
 }
 
 // -----------------------------------------------------------------------------
-// Function: lcdDetach
+// Function: applyLcdDetach
 // Purpose:
 // Clears LCD state when the G13 disconnects or its collection is released.
 //
-// Special behavior:
-// If detach occurs shortly after an LCD frame starts, LCD is disabled for the
-// rest of this Teensy session. This protects HID stability from reconnect loops.
 // -----------------------------------------------------------------------------
-void lcdDetach() {
-  if (lcdFrameStartMs != 0 && (millis() - lcdFrameStartMs < LCD_RECONNECT_GUARD_MS)) {
-    lcdDisabledForSession = true;
-    logDisabledOnce();
-  }
-
+static void applyLcdDetach(uint32_t generation) {
   lcdDriver = nullptr;
+  lcdDriverOutSize = 0;
+  lcdDriverInterface = 0;
+  lcdConnectionGeneration = generation;
   lcdBootState = LCD_WAIT_DRIVER;
   lcdDirty = false;
   lcdTransferActive = false;
+  lcdPendingNativeFrame = nullptr;
+  lcdAnimationFrameInFlight = false;
+  lcdOutTransferPending = false;
+  lcdOutAttemptCount = 0;
+  lcdControlPending = LCD_CONTROL_NONE;
+  lcdControlAttemptCount = 0;
   backlightPending = false;
+  currentBacklightValid = false;
   lcdDisabledUntilDetach = false;
+  g13StartupAnimationReset();
+}
+
+void lcdQueueAttachEvent(USBHIDParser *driver) {
+  pendingLcdConnectionGeneration++;
+  pendingLcdAttachInterface = driver ? driver->interfaceNumber() : 0xff;
+  pendingLcdAttachOutSize = driver ? driver->outSize() : 0;
+  pendingLcdAttachDriver = driver;
+}
+
+void lcdQueueDetachEvent() {
+  pendingLcdConnectionGeneration++;
+  pendingLcdDetach = true;
+  pendingLcdAttachDriver = nullptr;
+  pendingLcdAttachOutSize = 0;
+}
+
+bool lcdQueueControlCompleteEvent(const Transfer_t *transfer) {
+  if (!transfer) {
+    return false;
+  }
+
+  LcdControlTransferType type = LCD_CONTROL_NONE;
+  if (transfer->setup.bmRequestType == 0x00 &&
+      transfer->setup.bRequest == 0x09 &&
+      transfer->setup.wValue == 0x0001 &&
+      transfer->setup.wIndex == 0x0000 &&
+      transfer->setup.wLength == 0) {
+    type = LCD_CONTROL_INIT;
+  } else if (transfer->setup.bmRequestType == 0x21 &&
+             transfer->setup.bRequest == 0x09 &&
+             transfer->setup.wValue == 0x0307 &&
+             transfer->setup.wIndex == 0x0000 &&
+             transfer->setup.wLength == sizeof(backlightPacket)) {
+    type = LCD_CONTROL_BACKLIGHT;
+  } else {
+    return false;
+  }
+
+  pendingControlCompletionGeneration = pendingLcdConnectionGeneration;
+  pendingControlCompletion = type;
+  return true;
+}
+
+bool lcdQueueOutCompleteEvent(const Transfer_t *transfer) {
+  if (!transfer) {
+    return false;
+  }
+
+  pendingOutCompletionGeneration = pendingLcdConnectionGeneration;
+  pendingOutCompletionLength = transfer->length;
+  return true;
+}
+
+static void serviceLcdTransferEvents() {
+  uint8_t controlCompletion = LCD_CONTROL_NONE;
+  uint16_t outCompletionLength = 0;
+  uint32_t controlGeneration = 0;
+  uint32_t outGeneration = 0;
+
+  const bool usbIrqWasEnabled = NVIC_IS_ENABLED(IRQ_USBHS);
+  NVIC_DISABLE_IRQ(IRQ_USBHS);
+  controlCompletion = pendingControlCompletion;
+  outCompletionLength = pendingOutCompletionLength;
+  controlGeneration = pendingControlCompletionGeneration;
+  outGeneration = pendingOutCompletionGeneration;
+  pendingControlCompletion = LCD_CONTROL_NONE;
+  pendingOutCompletionLength = 0;
+  if (usbIrqWasEnabled) {
+    NVIC_ENABLE_IRQ(IRQ_USBHS);
+  }
+
+  if (controlCompletion != LCD_CONTROL_NONE &&
+      controlGeneration == lcdConnectionGeneration &&
+      controlCompletion == lcdControlPending) {
+    const LcdControlTransferType completedType = lcdControlPending;
+    lcdControlPending = LCD_CONTROL_NONE;
+    lcdControlAttemptCount = 0;
+    lcdControlNextAttemptMs = millis();
+
+    if (completedType == LCD_CONTROL_INIT) {
+      logEvent("[G13] LCD init complete");
+      backlightPending = true;
+      lcdBootState = LCD_SEND_BACKLIGHT;
+    } else {
+      currentBacklightRed = lcdControlBacklightRed;
+      currentBacklightGreen = lcdControlBacklightGreen;
+      currentBacklightBlue = lcdControlBacklightBlue;
+      currentBacklightValid = true;
+      backlightPending =
+        pendingBacklightRed != currentBacklightRed ||
+        pendingBacklightGreen != currentBacklightGreen ||
+        pendingBacklightBlue != currentBacklightBlue;
+      backlightErrorLogged = false;
+      logEvent("[G13] Backlight updated");
+      if (lcdBootState == LCD_WAIT_BACKLIGHT ||
+          lcdBootState == LCD_SEND_BACKLIGHT) {
+        lcdBootState = LCD_INIT_SETTLE;
+        lcdStateSinceMs = millis();
+      }
+    }
+  }
+
+  if (outCompletionLength != 0 &&
+      outGeneration == lcdConnectionGeneration &&
+      lcdOutTransferPending) {
+    if (outCompletionLength != lcdOutPendingLength) {
+      noteLcdError();
+      return;
+    }
+
+    lcdTransferOffset += lcdOutPendingLength;
+    lcdOutTransferPending = false;
+    lcdOutAttemptCount = 0;
+    lcdOutNextAttemptMs = millis() + LCD_CHUNK_INTERVAL_MS;
+  }
+}
+
+static void serviceLcdTransferTimeouts() {
+  const uint32_t now = millis();
+
+  if (lcdControlPending != LCD_CONTROL_NONE &&
+      now - lcdControlTransferStartedMs > LCD_CONTROL_TIMEOUT_MS) {
+    const LcdControlTransferType timedOutType = lcdControlPending;
+    lcdControlPending = LCD_CONTROL_NONE;
+    if (timedOutType == LCD_CONTROL_INIT) {
+      logEvent("[G13] LCD init timeout");
+      noteLcdError();
+    } else {
+      finishBacklightFailure("[G13] Backlight timeout");
+    }
+  }
+
+  if (lcdOutTransferPending &&
+      now - lcdOutTransferStartedMs > LCD_OUT_TIMEOUT_MS) {
+    lcdOutTransferPending = false;
+    logEvent("[G13] LCD OUT timeout");
+    noteLcdError();
+  }
+}
+
+static void serviceLcdConnectionEvents() {
+  USBHIDParser *attachDriver = nullptr;
+  uint16_t attachOutSize = 0;
+  uint8_t attachInterface = 0;
+  uint32_t generation = 0;
+  bool detach = false;
+
+  const bool usbIrqWasEnabled = NVIC_IS_ENABLED(IRQ_USBHS);
+  NVIC_DISABLE_IRQ(IRQ_USBHS);
+  detach = pendingLcdDetach;
+  attachDriver = pendingLcdAttachDriver;
+  attachOutSize = pendingLcdAttachOutSize;
+  attachInterface = pendingLcdAttachInterface;
+  generation = pendingLcdConnectionGeneration;
+  pendingLcdDetach = false;
+  pendingLcdAttachDriver = nullptr;
+  pendingLcdAttachOutSize = 0;
+  if (usbIrqWasEnabled) {
+    NVIC_ENABLE_IRQ(IRQ_USBHS);
+  }
+
+  // Preserve ordering for a detach followed quickly by a new attach. Conversely,
+  // lcdQueueDetachEvent() clears an older unconsumed attach event.
+  if (detach) {
+    applyLcdDetach(generation);
+  }
+  if (attachDriver) {
+    applyLcdAttach(attachDriver, attachInterface, attachOutSize, generation);
+  }
 }
 
 // -----------------------------------------------------------------------------
 // Function: lcdInit
 // Purpose:
-// Sends the known LCD initialization control request and schedules blue lighting.
-//
-// USB request:
-// bmRequestType=0x00, bRequest=0x09, wValue=0x0001, wIndex=0x0000.
-//
-// Output:
-// Moves the LCD state machine to INIT_SETTLE if the control transfer queues.
-// On failure, disables LCD and leaves HID processing untouched.
+// Starts the known LCD initialization control request. Completion is confirmed
+// asynchronously before lighting or bitmap transfers can begin.
 // -----------------------------------------------------------------------------
 void lcdInit() {
   if (!driverLooksLikeG13()) {
@@ -677,20 +986,9 @@ void lcdInit() {
     return;
   }
 
-  if (!lcdDriver->sendControlPacket(0x00, 0x09, 0x0001, 0x0000, 0, nullptr)) {
-    noteLcdError();
-    return;
+  if (queueControlTransfer(LCD_CONTROL_INIT)) {
+    lcdBootState = LCD_WAIT_INIT;
   }
-
-  if (!lcdInitSentLogged) {
-    logEvent("[G13] LCD init sent");
-    lcdInitSentLogged = true;
-  }
-
-  queueBacklightColor(LCD_BACKLIGHT_BLUE_R, LCD_BACKLIGHT_BLUE_G, LCD_BACKLIGHT_BLUE_B);
-
-  lcdBootState = LCD_INIT_SETTLE;
-  lcdStateSinceMs = millis();
 }
 
 // -----------------------------------------------------------------------------
@@ -772,23 +1070,24 @@ void lcdUpdate() {
 // Services LCD/backlight state machines from the main loop.
 //
 // Flow:
-// - Sends pending lighting reports when possible.
+// - Applies queued USB callback events.
 // - Waits for a stable HID claim before LCD init.
-// - Sends one logo frame in chunks.
-// - Stops in READY without resending the logo.
+// - Confirms serialized init and lighting control transfers.
+// - Sends startup frames in completion-checked chunks.
+// - Waits in READY until the animation timeline or lcdUpdate() requests a frame.
 //
 // Important:
 // This function must not block or delay. It shares the cooperative loop with
 // USBHost_t36, so all waiting is based on millis() and state transitions.
 // -----------------------------------------------------------------------------
 void updateDisplay() {
-  if (lcdBootState != LCD_ERROR) {
-    serviceBacklight();
-  }
+  serviceLcdConnectionEvents();
+  serviceLcdTransferEvents();
+  serviceLcdTransferTimeouts();
 
   switch (lcdBootState) {
     case LCD_WAIT_DRIVER:
-      if (!lcdDisabledForSession && millis() > LCD_STABLE_CLAIM_MS) {
+      if (millis() > LCD_STABLE_CLAIM_MS) {
         logNoDriverOnce();
       }
       return;
@@ -803,8 +1102,35 @@ void updateDisplay() {
       lcdInit();
       return;
 
+    case LCD_WAIT_INIT:
+      return;
+
+    case LCD_SEND_BACKLIGHT:
+      if (!backlightPending) {
+        lcdBootState = LCD_INIT_SETTLE;
+        lcdStateSinceMs = millis();
+      } else if (queueControlTransfer(LCD_CONTROL_BACKLIGHT)) {
+        lcdBootState = LCD_WAIT_BACKLIGHT;
+      }
+      return;
+
+    case LCD_WAIT_BACKLIGHT:
+      return;
+
     case LCD_INIT_SETTLE:
       if (millis() - lcdStateSinceMs >= 50) {
+#if G13_LCD_ANIMATION_ENABLE || G13_LCD_PERMANENT_FRAME_ENABLE
+        const uint8_t *firstFrame =
+          g13StartupAnimationBeginFrame(millis(), lcdTransferActive);
+        if (firstFrame) {
+          lcdPendingNativeFrame = firstFrame;
+          lcdAnimationFrameInFlight = true;
+          lcdUpdate();
+          lcdBootState = LCD_SEND_SPLASH;
+        } else {
+          lcdBootState = LCD_READY;
+        }
+#elif G13_LCD_STATIC_FALLBACK_ENABLE
         lcdDrawBitmap(logo_g13_m2);
         if (LCD_INVERT_LOGO_FOR_WHITE_ON_BLACK) {
           lcdInvertFramebuffer();
@@ -814,11 +1140,18 @@ void updateDisplay() {
         }
         lcdUpdate();
         lcdBootState = LCD_SEND_SPLASH;
+#else
+        lcdBootState = LCD_READY;
+#endif
       }
       return;
 
     case LCD_SEND_SPLASH:
       if (sendPendingLcdFrame()) {
+        if (lcdAnimationFrameInFlight) {
+          g13StartupAnimationTransferCompleted(millis());
+          lcdAnimationFrameInFlight = false;
+        }
         if (!lcdOnlineLogged) {
           logEvent("[G13] LCD online");
           lcdOnlineLogged = true;
@@ -829,6 +1162,25 @@ void updateDisplay() {
       return;
 
     case LCD_READY:
+      serviceBacklight();
+      if (lcdDirty) {
+        lcdBootState = LCD_SEND_SPLASH;
+        return;
+      }
+#if G13_LCD_ANIMATION_ENABLE || G13_LCD_PERMANENT_FRAME_ENABLE
+      {
+        const uint8_t *nextFrame = g13StartupAnimationBeginFrame(
+          millis(),
+          lcdTransferActive || lcdDirty
+        );
+        if (nextFrame) {
+          lcdPendingNativeFrame = nextFrame;
+          lcdAnimationFrameInFlight = true;
+          lcdUpdate();
+          lcdBootState = LCD_SEND_SPLASH;
+        }
+      }
+#endif
       return;
 
     case LCD_ERROR:
@@ -862,11 +1214,22 @@ bool lcdCanAttachTo(USBHIDParser *driver) {
   return false;
 }
 
-void lcdAttach(USBHIDParser *driver) {
+void lcdQueueAttachEvent(USBHIDParser *driver) {
   (void)driver;
 }
 
-void lcdDetach() {}
+void lcdQueueDetachEvent() {}
+
+bool lcdQueueControlCompleteEvent(const Transfer_t *transfer) {
+  (void)transfer;
+  return false;
+}
+
+bool lcdQueueOutCompleteEvent(const Transfer_t *transfer) {
+  (void)transfer;
+  return false;
+}
+
 void lcdInit() {}
 void lcdClear() {}
 

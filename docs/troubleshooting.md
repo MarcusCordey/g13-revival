@@ -28,13 +28,23 @@
 ## The LCD stays blank
 
 - Confirm that `G13_LCD_ENABLE` is `1` in `G13Config.h`.
-- Look for `[G13] LCD attach`, `LCD init sent`, `LCD frame queued` and
-  `LCD online` messages.
+- Confirm that `G13_LCD_ANIMATION_ENABLE` or
+  `G13_LCD_PERMANENT_FRAME_ENABLE` is `1`. The previous static startup image is
+  used only when both are disabled and `G13_LCD_STATIC_FALLBACK_ENABLE` is `1`.
+- Look for `[G13] LCD attach`, `LCD init complete`, `Backlight updated` and
+  `LCD online` messages. These success messages are emitted after confirmed
+  transfer completion.
 - A `LCD no driver` message means no suitable G13 interface with an OUT
   endpoint was attached.
-- A `LCD error` or `LCD disabled` message means the safety guard stopped the LCD
+- An `init timeout`, `OUT timeout`, `queue error`, `LCD error` or
+  `LCD disabled` message means the safety guard stopped the affected transfer
   path. Keyboard input may continue.
 - Power-cycle the complete setup before repeating an LCD test.
+
+The default animation plays once after attach or reconnect, holds
+`READY FOR AZEROTH` for its normal duration plus two seconds, and then leaves
+`M² inside | Powered by Marie` on screen. Timing and repeat behavior are
+documented in [`startup-animation.md`](startup-animation.md).
 
 ## Keyboard input stalls or disconnects
 
@@ -43,11 +53,12 @@
 - Disconnect optional USB devices from the hub during diagnosis.
 - If LCD activity is suspected, temporarily set `G13_LCD_ENABLE` to `0` for a
   diagnostic build. This changes behavior and should not replace the tested
-  `v1.0.0` reference without separate validation.
+  `v1.1.0` standard configuration without separate validation.
 
 ## Serial output is very verbose
 
-The firmware retains PJRC HID diagnostic controls:
+Continuous HID report output is disabled by default. The firmware retains PJRC
+HID diagnostic controls for temporary investigation:
 
 - `r` toggles raw HID output.
 - `c` toggles changed-data-only mode.
@@ -55,4 +66,3 @@ The firmware retains PJRC HID diagnostic controls:
 
 Review logs before sharing them because attached USB devices can report serial
 numbers.
-

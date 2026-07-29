@@ -49,6 +49,9 @@ void USBDeviceInfo::init()
 bool USBDeviceInfo::claim(Device_t *dev, int type, const uint8_t *descriptors, uint32_t len) {
 	println("\nUSBDeviceInfo claim this=", (uint32_t)this, HEX);
 
+	if (!dev || (!descriptors && len != 0)) {
+		return false;
+	}
 
 	if (type == 0) {
 		// At device level
@@ -62,6 +65,8 @@ bool USBDeviceInfo::claim(Device_t *dev, int type, const uint8_t *descriptors, u
 		dump_hexbytes(descriptors, len, 0);
 		return false;
 	}
+	if (!descriptors) return false;
+
 	// only claim at interface level
 	Serial.println("\n****************************************");
 	Serial.println("** Interface Level **");
@@ -101,11 +106,11 @@ bool USBDeviceInfo::claim(Device_t *dev, int type, const uint8_t *descriptors, u
 	uint16_t descsize = 0;
 
 	if (hidlen < 9) return false;
+	if (offset + hidlen > len) return false;
 
 	if (descriptors[10] == 33)  { // This is a HID Descriptor type. return false; // descriptor type, 33=HID
 		if (descriptors[14] < 1) return false;  // must be at least 1 extra descriptor
 		if (hidlen != (uint32_t)(6 + descriptors[14] * 3)) return false; // must be correct size
-		if (9 + hidlen > len) return false;
 		uint32_t i=0;
 		while (1) {
 			if (descriptors[15 + i * 3] == 34) { // found HID report descriptor
@@ -120,7 +125,17 @@ bool USBDeviceInfo::claim(Device_t *dev, int type, const uint8_t *descriptors, u
 	}
 	// endpoint descriptor(s)
 	while (numendpoint && (offset < len)) {
-		if ((descriptors[offset] == 7) && (descriptors[offset+1] == 5)) {
+		uint32_t remaining = len - offset;
+		if (remaining < 2) {
+			break;
+		}
+
+		uint8_t descriptorLength = descriptors[offset];
+		if (descriptorLength < 2 || descriptorLength > remaining) {
+			break;
+		}
+
+		if ((descriptorLength >= 7) && (descriptors[offset+1] == 5)) {
 			// we have an end point:
 			println("  endpoint = ", descriptors[offset+2], HEX);
 			print(  "    attributes = ", descriptors[offset+3], HEX);
@@ -135,7 +150,7 @@ bool USBDeviceInfo::claim(Device_t *dev, int type, const uint8_t *descriptors, u
 			println("    interval = ", descriptors[offset+6]);
 			numendpoint--;
 		}
-		offset += descriptors[offset];
+		offset += descriptorLength;
 	}
 	return false;
 }
