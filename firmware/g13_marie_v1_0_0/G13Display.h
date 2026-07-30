@@ -18,7 +18,6 @@ No warranty is provided. Use at your own risk.
 
 #pragma once
 
-#include "G13Config.h"
 #include <Arduino.h>
 #include <USBHost_t36.h>
 

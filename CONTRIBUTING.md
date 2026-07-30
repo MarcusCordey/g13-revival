@@ -4,9 +4,11 @@ Contributions are welcome after the repository is opened for collaboration.
 
 ## Priorities
 
-The tested `v1.1.0` firmware is the stability baseline. Changes must preserve
-reliable G13-to-keyboard operation. LCD or lighting work must not compromise
-the HID input path.
+The physically tested `v1.1.0` firmware remains the stability baseline. Version
+`v1.2.0` adds a compile- and host-tested user-configuration layer, but it was
+not physically validated during that development step. Changes must preserve
+reliable G13-to-keyboard operation. LCD, theme or lighting work must not
+compromise the HID input path.
 
 ## Before proposing a change
 
@@ -15,8 +17,13 @@ the HID input path.
    changes.
 3. State the Teensy board package, board options and host operating system used.
 4. Compile the complete sketch.
-5. For USB, keymapping, LCD or lighting changes, test with a physical Logitech
-   G13 and describe the result.
+5. For user-configuration, keymapping, theme or timing changes, compile the
+   standard, HID-only, static-theme and no-start-image variants and run all host
+   tests, including representative invalid-value checks.
+6. For USB, keymapping, LCD or lighting changes, test with a physical Logitech
+   G13 and describe the result. If hardware is unavailable, state that boundary
+   explicitly and do not describe compile or host-test results as hardware
+   validation.
 
 ## Licensing and provenance
 

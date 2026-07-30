@@ -9,17 +9,25 @@ The Teensy operates simultaneously as:
 - a USB host for the physical G13; and
 - a USB HID keyboard device toward the computer.
 
-Version `v1.1.0` is based on a firmware state that was successfully compiled,
-uploaded to a Teensy 4.1 and tested with a physical Logitech G13.
+Version `v1.2.0` adds one documented user-configuration interface while
+preserving the `v1.1.0` default behavior. The `v1.2.0` standard, HID-only,
+static-theme and no-start-image builds compiled without warnings, and all host
+tests passed. This version was not uploaded to a Teensy or tested on a physical
+G13 during this development step. The physical-hardware stability baseline
+remains `v1.1.0`.
 
 ## Current features
 
-- decoding and keyboard mapping for G1 through G22;
+- decoding and user-configurable keyboard mapping for G1 through G22;
 - simultaneous key handling with deterministic six-key rollover and promotion
   of further held G-keys when a slot becomes free;
+- a central
+  [`G13UserConfig.h`](firmware/g13_marie_v1_0_0/G13UserConfig.h) for normal
+  key, backlight, LCD-theme and animation customization;
 - LCD initialization, an eight-frame 160 x 48 pixel Marie/Latte-Overclock
   startup story and the permanent `M² inside | Powered by Marie` frame;
-- RGB/key-backlight initialization used by the LCD startup path;
+- user-configurable RGB/key-backlight initialization used by the LCD startup
+  path;
 - event-based USB and HID diagnostics;
 - status LED and HID-report stall monitoring;
 - G13-specific HID claiming and disconnect cleanup;
@@ -37,25 +45,34 @@ that are not yet fully supported.
 3. Open
    `firmware/g13_marie_v1_0_0/g13_marie_v1_0_0.ino`
    in Arduino IDE.
-4. Select the documented Teensy 4.1 board options.
-5. Compile and upload the sketch.
-6. Connect the G13 through the powered USB hub to the Teensy USB host port.
+4. Optionally edit only
+   `firmware/g13_marie_v1_0_0/G13UserConfig.h` as described in
+   [User configuration](docs/user-configuration.md). Leave it unchanged for the
+   documented defaults.
+5. Select the documented Teensy 4.1 board options.
+6. Compile and upload the sketch.
+7. Connect the G13 through the powered USB hub to the Teensy USB host port.
 
 The historical sketch and folder name `g13_marie_v1_0_0` is intentionally
-retained for `v1.1.0`. Arduino requires the primary `.ino` file and its folder to
+retained for `v1.2.0`. Arduino requires the primary `.ino` file and its folder to
 have matching names; renaming both would create unnecessary path churn and
 release risk. The maintained project version is recorded in `info.txt`, this
 README and the changelog.
 
-## Build variants
+## User configuration and build variants
 
-The default build enables the LCD story, permanent frame and existing lighting
-path. Compile-time controls in
-[`G13Config.h`](firmware/g13_marie_v1_0_0/G13Config.h) also provide an HID-only
-diagnostic build, repeat playback, permanent-only output, the previous static
-fallback and a build without a startup image. The exact combinations are listed
-in [Installation](docs/installation.md) and
-[LCD startup animation](docs/startup-animation.md).
+Normal customization belongs only in
+[`G13UserConfig.h`](firmware/g13_marie_v1_0_0/G13UserConfig.h). Its defaults
+preserve the established G1 through G22 mapping, blue RGB value, one-shot
+Marie/Latte story and permanent signature. It can also select the previous
+static image or no automatic startup graphic.
+
+[`G13Config.h`](firmware/g13_marie_v1_0_0/G13Config.h) contains internal
+protocol and safety controls. Its `G13_LCD_ENABLE=0` setting is retained for the
+HID-only diagnostic build, not for normal setup. See
+[User configuration](docs/user-configuration.md),
+[Installation](docs/installation.md) and
+[LCD startup animation](docs/startup-animation.md) for the exact options.
 
 ## Hardware validation
 
@@ -66,19 +83,24 @@ and the permanent signature all worked as intended. During a physical
 disconnect while a movement key was held in World of Warcraft, movement stopped
 immediately and no key remained active.
 
-This validates the observed keyboard and display behavior, not every possible
-USB timing condition. See [Hardware validation](docs/hardware-validation.md) for
-the exact test boundary and open special cases.
+The `v1.2.0` configuration layer and its four release build variants were
+validated by compilation and host tests only. They were not uploaded or tested
+on the physical G13/Teensy setup in this development step. The earlier hardware
+results therefore do not constitute physical validation of `v1.2.0` or of
+custom key, color, theme or timing values. See
+[Hardware validation](docs/hardware-validation.md) for the exact boundary.
 
 ## Repository structure
 
 ```text
 firmware/g13_marie_v1_0_0/  Arduino sketch and supporting source files
+firmware/g13_marie_v1_0_0/G13UserConfig.h  Normal user customization
 firmware/SHA256SUMS-v1.0.0.txt  Fingerprints of the published v1.0.0 baseline
-firmware/SHA256SUMS-v1.1.0.txt  Fingerprints of the v1.1.0 firmware directory
+firmware/SHA256SUMS-v1.1.0.txt  Historical v1.1.0 firmware fingerprints
+firmware/SHA256SUMS-v1.2.0.txt  Fingerprints of the v1.2.0 firmware directory
 assets/startup-animation/   Ordered 1-bit source frames and enlarged preview
 tools/                      Reproducible asset generation and conversion tools
-tests/                      Host-side asset and animation-timeline tests
+tests/                      Host-side configuration, asset and timeline tests
 docs/                       Hardware, installation and operating documentation
 LICENSE                     MIT license for the original project material
 THIRD_PARTY_NOTICES.md      PJRC, Paul Stoffregen and khampf/ecraven notices
@@ -86,20 +108,21 @@ CHANGELOG.md                Version history
 CONTRIBUTING.md             Contribution requirements
 ```
 
-`SHA256SUMS-v1.0.0.txt` remains an unchanged historical record and is not
-expected to validate modified files in a `v1.1.0` checkout.
-`SHA256SUMS-v1.1.0.txt` uses SHA-256 and lists every regular file directly in
-`firmware/g13_marie_v1_0_0/`, including firmware sources, metadata, the generated
-native animation header and static fallback image. It was generated after the
-successful standard and HID-only release builds and before the release commit.
-From the `firmware/` directory, verify the current file with:
+`SHA256SUMS-v1.0.0.txt` and `SHA256SUMS-v1.1.0.txt` remain unchanged historical
+records and are not expected to validate modified files in a `v1.2.0` checkout.
+`SHA256SUMS-v1.2.0.txt` uses SHA-256 and lists every regular file directly in
+`firmware/g13_marie_v1_0_0/`, including `G13UserConfig.h`, firmware sources,
+metadata, the generated native animation header and previous static image. It
+was generated after the successful release builds and host tests. From the
+`firmware/` directory, verify the current file with:
 
 ```sh
-shasum -a 256 -c SHA256SUMS-v1.1.0.txt
+shasum -a 256 -c SHA256SUMS-v1.2.0.txt
 ```
 
 ## Documentation
 
+- [User configuration](docs/user-configuration.md)
 - [Installation](docs/installation.md)
 - [Required hardware](docs/hardware.md)
 - [Wiring](docs/wiring.md)

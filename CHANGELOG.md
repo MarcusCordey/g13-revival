@@ -4,6 +4,57 @@ All notable project changes will be documented in this file.
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-07-30
+
+### Added
+
+- Added `G13UserConfig.h` as the single documented interface for normal user
+  customization.
+- Added individually named `G13_KEY_G1` through `G13_KEY_G22` settings with
+  Teensy `KEY_*` values and the unchanged default mapping.
+- Added user-configurable RGB/key-backlight channels with the existing
+  `RGB(0, 0, 255)` default.
+- Added master themes for the Marie/Latte story, previous static image and no
+  automatic startup graphic without duplicating image data, while retaining an
+  explicit static-fallback choice inside the Marie theme.
+- Added compile-time validation with targeted messages for keycodes, RGB
+  channels, themes, Boolean options and timing ranges.
+- Added host tests for defaults, all theme paths, supported overrides and
+  representative invalid values.
+- Added a complete user-configuration guide and cross-links from installation,
+  keymapping, animation, troubleshooting and limitation documentation.
+
+### Changed
+
+- Moved the complete G1 through G22 mapping out of the sketch and into the user
+  configuration while preserving its default behavior.
+- Changed the key table to the Teensy `KEY_*` interface and 16-bit storage, and
+  added atomic shared-key reconciliation so two G-keys can safely use one output
+  key.
+- Moved RGB and user-facing LCD behavior/timing values out of implementation
+  files and into `G13UserConfig.h`.
+- Kept USB protocol, transfer, retry, timeout and safety controls in the
+  internal `G13Config.h`.
+- Updated project metadata, documentation and firmware fingerprints for
+  `v1.2.0`.
+
+### Validation
+
+- Standard Marie/Latte, HID-only, static-theme and no-start-image builds
+  completed without compiler warnings.
+- All four user-configuration tests passed; complete Python discovery passed
+  14 of 14 tests; and the strict C++ animation-timeline test passed.
+- Invalid RGB, theme, Boolean, timing and keycode examples produced their
+  intended compile-time error messages, and valid values compiled again.
+
+### Hardware validation
+
+- No `v1.2.0` build was uploaded to a Teensy or tested on a physical Logitech
+  G13 during this development step.
+- The physically tested `v1.1.0` standard configuration remains the stability
+  baseline. The new configuration layer, custom mappings/colors/timings and all
+  `v1.2.0` theme variants still require physical validation.
+
 ## [1.1.0] - 2026-07-29
 
 ### Added

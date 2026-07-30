@@ -18,19 +18,50 @@
 - Try a known data-capable Micro-USB cable.
 - Press the Teensy program button once if Teensy Loader requests it.
 
+## The firmware does not compile after customization
+
+- Edit only `G13UserConfig.h` for normal configuration.
+- Read the first named configuration error in the compiler output; later errors
+  may be consequences of the first value.
+- RGB channels must be `0` through `255`.
+- Boolean animation, permanent, repeat and fallback options must be `0` or `1`.
+- Use one of `G13_LCD_THEME_MARIE_LATTE`, `G13_LCD_THEME_STATIC` or
+  `G13_LCD_THEME_NONE`.
+- Do not edit the numeric definitions of the three `G13_LCD_THEME_*` constants.
+- Normal and LATTE times must be `1` through `60000` milliseconds. The
+  additional READY hold must be `0` through `60000`.
+- Use a supported Teensy `KEY_*` constant for every G-key. A misspelling such as
+  `KEY_SPCAE` produces the corresponding
+  `G13_KEY_Gn must be a supported normal-key Teensy KEY_* constant` error.
+- Restore the documented defaults, save, and click **Verify** again.
+
+The exact messages, valid ranges and complete default block are in
+[`user-configuration.md`](user-configuration.md).
+
 ## Keys produce unexpected characters
 
-- Select the **German (Mac)** Teensy keyboard layout used by the reference
-  build.
-- Compare the result with `keymapping.md`.
+- Check `G13_KEY_G1` through `G13_KEY_G22` in `G13UserConfig.h`.
+- Use supported Teensy `KEY_*` constants, not quoted ASCII character literals.
+- Keep the **German (Mac)** Teensy setting used by the reference build, and
+  check the host operating system's active layout. `KEY_*` values are direct
+  USB-HID positions; the host layout interprets positions such as Y and Z.
+- Compare the result with [`keymapping.md`](keymapping.md).
 - Remember that several mappings are intentionally marked as test mappings.
+- Compile and upload again after every mapping change.
 
 ## The LCD stays blank
 
-- Confirm that `G13_LCD_ENABLE` is `1` in `G13Config.h`.
-- Confirm that `G13_LCD_ANIMATION_ENABLE` or
-  `G13_LCD_PERMANENT_FRAME_ENABLE` is `1`. The previous static startup image is
-  used only when both are disabled and `G13_LCD_STATIC_FALLBACK_ENABLE` is `1`.
+- Check `G13_LCD_THEME` in `G13UserConfig.h`.
+  `G13_LCD_THEME_NONE` intentionally sends no startup graphic.
+- `G13_LCD_THEME_STATIC` sends the previous static image and ignores the
+  Marie-specific animation choices.
+- With `G13_LCD_THEME_MARIE_LATTE`, confirm that animation, permanent frame or
+  both are enabled if an automatic story/signature is expected. If both are
+  `0`, `G13_LCD_STATIC_FALLBACK_ENABLE=1` sends the previous static image and
+  `0` sends no image.
+- If an internal HID-only diagnostic build was intentionally compiled, set
+  `G13_LCD_ENABLE` back to `1` in `G13Config.h` and rebuild. This is an advanced
+  diagnostic control, not a normal user theme.
 - Look for `[G13] LCD attach`, `LCD init complete`, `Backlight updated` and
   `LCD online` messages. These success messages are emitted after confirmed
   transfer completion.
@@ -46,6 +77,16 @@ The default animation plays once after attach or reconnect, holds
 `M² inside | Powered by Marie` on screen. Timing and repeat behavior are
 documented in [`startup-animation.md`](startup-animation.md).
 
+## The backlight color is unexpected
+
+- Check all three `G13_BACKLIGHT_RED`, `G13_BACKLIGHT_GREEN` and
+  `G13_BACKLIGHT_BLUE` values in `G13UserConfig.h`.
+- Each value must be `0` through `255`; the default is blue `(0, 0, 255)`.
+- Compile and upload after changing a color.
+- The G13 protocol may apply this report to key/global lighting rather than the
+  monochrome LCD itself. Non-default colors were not physically validated for
+  `v1.2.0`.
+
 ## Keyboard input stalls or disconnects
 
 - Use the powered hub and short, reliable USB cables.
@@ -53,7 +94,7 @@ documented in [`startup-animation.md`](startup-animation.md).
 - Disconnect optional USB devices from the hub during diagnosis.
 - If LCD activity is suspected, temporarily set `G13_LCD_ENABLE` to `0` for a
   diagnostic build. This changes behavior and should not replace the tested
-  `v1.1.0` standard configuration without separate validation.
+  `v1.1.0` physical-hardware baseline without separate validation.
 
 ## Serial output is very verbose
 

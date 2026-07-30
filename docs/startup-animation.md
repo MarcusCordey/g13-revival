@@ -1,7 +1,9 @@
 # LCD startup animation
 
 The non-blocking animation and permanent signature were introduced in
-`v1.1.0`.
+`v1.1.0`. Version `v1.2.0` adds a central user configuration and master-theme
+selection without changing the default frames, timing or transfer state
+machine.
 
 ## Story and permanent frame
 
@@ -108,9 +110,22 @@ existing LCD detach path. Attach or reconnect therefore starts again with frame
 1. A completion event from the previous USB connection is ignored by the
 existing connection-generation check and cannot advance the reset timeline.
 
-## Compile-time options
+## Themes and compile-time options
 
-The options are in `firmware/g13_marie_v1_0_0/G13Config.h`:
+Normal presentation options are in
+`firmware/g13_marie_v1_0_0/G13UserConfig.h`. The master theme is selected with
+`G13_LCD_THEME`:
+
+| Theme | Meaning |
+|---|---|
+| `G13_LCD_THEME_MARIE_LATTE` | Default eight-frame story and Marie-specific options |
+| `G13_LCD_THEME_STATIC` | Previous static G13 image; Marie options are ignored |
+| `G13_LCD_THEME_NONE` | No automatic startup graphic; Marie options are ignored |
+
+Change only the `G13_LCD_THEME` selection. The three named theme ID constants
+are implementation identifiers and must not be edited.
+
+Within `G13_LCD_THEME_MARIE_LATTE`, these options apply:
 
 | Option | Default | Meaning |
 |---|---:|---|
@@ -120,14 +135,26 @@ The options are in `firmware/g13_marie_v1_0_0/G13Config.h`:
 | `G13_LATTE_OVERCLOCK_MS` | `1200` | Confirmed hold for frame 6 |
 | `G13_READY_HOLD_MS` | `2000` | Additional hold after READY's normal time |
 | `G13_LCD_ANIMATION_REPEAT` | `0` | Repeat frames 1–8 instead of entering the permanent state |
-| `G13_LCD_STATIC_FALLBACK_ENABLE` | `1` | Use the former static logo when animation and permanent frame are disabled |
+| `G13_LCD_STATIC_FALLBACK_ENABLE` | `1` | Use the previous static image when animation and permanent frame are both disabled |
 
 With animation disabled and the permanent frame enabled, the signature is sent
 directly once after the established initialization sequence. Repeat mode loops
 frames 1–8 after both READY hold phases and therefore intentionally does not
 enter the permanent state. With animation and permanent frame disabled, the
-old static fallback is used if enabled. `G13_LCD_ENABLE=0` still removes the
-complete LCD and lighting path for HID-only diagnosis.
+fallback value selects the previous static image (`1`) or no startup image
+(`0`).
+
+The master `STATIC` and `NONE` themes override all Marie-specific choices.
+
+`G13_LCD_THEME_NONE` still permits the guarded LCD initialization and
+RGB/key-backlight path. The internal `G13_LCD_ENABLE=0` setting in
+`G13Config.h` removes the complete LCD and lighting path for HID-only diagnosis.
+It is not a normal user theme.
+
+All Boolean values accept only `0` or `1`. Normal and LATTE timing values accept
+`1` through `60000` milliseconds; the additional READY hold accepts `0` through
+`60000`. The complete precedence table and examples are in
+[`user-configuration.md`](user-configuration.md).
 
 ## Storage impact
 
@@ -136,7 +163,7 @@ of immutable native image data. This is only 1920 bytes more than the preceding
 seven-frame implementation, so compression would add complexity without a
 useful Teensy 4.1 resource benefit.
 
-The previous static fallback remains a 960-byte source asset, but it is excluded
+The previous static image remains a 960-byte source asset, but it is excluded
 from the standard animation build by compile-time guards. The existing runtime
 buffers remain one 960-byte logical framebuffer and one 992-byte USB payload
 buffer.
@@ -154,32 +181,41 @@ table and the extended timeline logic. The images are not duplicated in RAM.
 
 ## Host-side validation
 
-Run the deterministic asset and timeline tests from the repository root:
+Run all Python asset and user-configuration tests plus the deterministic
+timeline test from the repository root:
 
 ```sh
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v tests/test_animation_assets.py
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_*.py' -v
 c++ -std=c++17 -Wall -Wextra -Werror \
   tests/test_g13_animation_timeline.cpp \
   -o /tmp/test_g13_animation_timeline
 /tmp/test_g13_animation_timeline
 ```
 
-The tests verify all nine source modes and sizes, each 960-byte native array,
+Python discovery passed 14 of 14 tests, including all four user-configuration
+tests. These verify all nine source modes and sizes, each 960-byte native array,
 the explicit frame order, native pixel mapping, exact 4x previews,
-deterministic regeneration, normal/special/READY timing, transfer exclusion,
-one-time permanent-frame scheduling, repeat behavior, reset/reconnect behavior
-and `millis()` wraparound.
+deterministic regeneration, default key/color/timing values, all three master
+themes, supported overrides and targeted invalid-value errors. The strict C++
+test verifies normal/special/READY timing, transfer exclusion, one-time
+permanent-frame scheduling, repeat behavior, reset/reconnect behavior and
+`millis()` wraparound.
 
 ## Hardware validation
 
-The standard animation completed successfully on a physical Logitech G13 and
-Teensy 4.1. The LCD operated, `READY FOR AZEROTH` appeared correctly and the
-permanent `M² inside | Powered by Marie` signature followed as intended. Normal
-G-key input and the tested simultaneous-key combinations also remained
-functional in the validated standard configuration.
+The `v1.1.0` standard animation completed successfully on a physical Logitech
+G13 and Teensy 4.1. The LCD operated, `READY FOR AZEROTH` appeared correctly and
+the permanent `M² inside | Powered by Marie` signature followed as intended.
+Normal G-key input and the tested simultaneous-key combinations also remained
+functional in that validated standard configuration.
 
 Compile and host tests cannot cover every physical USB timing path. Disconnect
 during initialization or individual animation phases, rapid reconnects, forced
 transfer failures, lighting resend timing and the alternative build modes
 remain open. The canonical list of confirmed results and untested special cases
 is maintained in [`hardware-validation.md`](hardware-validation.md).
+
+No `v1.2.0` build was uploaded to the Teensy or tested with the physical G13 in
+this development step. The unchanged default timeline, `STATIC` and `NONE`
+themes, custom timing and the new configuration path therefore still require
+physical validation.

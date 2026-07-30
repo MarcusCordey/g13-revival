@@ -17,13 +17,12 @@ No warranty is provided. Use at your own risk.
 */
 
 #include "G13Display.h"
+#include "G13Config.h"
 #include "G13StartupAnimation.h"
 
 #if G13_LCD_ENABLE
 
-#if !G13_LCD_ANIMATION_ENABLE && \
-    !G13_LCD_PERMANENT_FRAME_ENABLE && \
-    G13_LCD_STATIC_FALLBACK_ENABLE
+#if G13_INTERNAL_LCD_STATIC_FALLBACK_ENABLE
 #include "logo_g13_m2.h"
 #endif
 #include <string.h>
@@ -65,15 +64,10 @@ static const uint16_t LCD_TRANSFER_SIZE = LCD_TRANSFER_HEADER_SIZE + LCD_FRAMEBU
 // gewuenschte blaue Hintergrundwirkung bleibt das Logo invertiert (weisse
 // Logopixel), und der sonst schwarze Grafikhintergrund wird leicht gedithert,
 // damit die blaue Beleuchtung optisch durchwirken kann.
-#if !G13_LCD_ANIMATION_ENABLE && \
-    !G13_LCD_PERMANENT_FRAME_ENABLE && \
-    G13_LCD_STATIC_FALLBACK_ENABLE
+#if G13_INTERNAL_LCD_STATIC_FALLBACK_ENABLE
 static const bool LCD_INVERT_LOGO_FOR_WHITE_ON_BLACK = true;
 static const bool LCD_DITHER_LOGO_BACKGROUND_FOR_BACKLIGHT = true;
 #endif
-static const uint8_t LCD_BACKLIGHT_BLUE_R = 0;
-static const uint8_t LCD_BACKLIGHT_BLUE_G = 0;
-static const uint8_t LCD_BACKLIGHT_BLUE_B = 255;
 
 // USBHIDParser currently selected for LCD OUT traffic.
 // It is only set after lcdCanAttachTo() confirms a G13 parser with an OUT
@@ -135,9 +129,9 @@ static uint8_t lcdOutAttemptCount = 0;
 static uint8_t currentBacklightRed = 0;
 static uint8_t currentBacklightGreen = 0;
 static uint8_t currentBacklightBlue = 0;
-static uint8_t pendingBacklightRed = LCD_BACKLIGHT_BLUE_R;
-static uint8_t pendingBacklightGreen = LCD_BACKLIGHT_BLUE_G;
-static uint8_t pendingBacklightBlue = LCD_BACKLIGHT_BLUE_B;
+static uint8_t pendingBacklightRed = G13_BACKLIGHT_RED;
+static uint8_t pendingBacklightGreen = G13_BACKLIGHT_GREEN;
+static uint8_t pendingBacklightBlue = G13_BACKLIGHT_BLUE;
 static bool currentBacklightValid = false;
 static bool backlightPending = false;
 
@@ -191,14 +185,8 @@ static bool lcdDisabledUntilDetach = false;
 
 // Timing constants:
 // These are not delay() calls. They gate state-machine transitions while the
-// main loop continues to run USBHost_t36 and HID processing.
-static const uint32_t LCD_STABLE_CLAIM_MS = 1000;
-static const uint32_t LCD_CHUNK_INTERVAL_MS = 2;
-static const uint32_t LCD_TRANSFER_TIMEOUT_MS = 2500;
-static const uint32_t LCD_CONTROL_TIMEOUT_MS = 500;
-static const uint32_t LCD_OUT_TIMEOUT_MS = 250;
-static const uint32_t LCD_RETRY_BACKOFF_MS = 100;
-static const uint8_t LCD_MAX_TRANSFER_ATTEMPTS = 3;
+// main loop continues to run USBHost_t36 and HID processing. Their internal
+// values are defined in G13Config.h, separate from G13UserConfig.h.
 
 // -----------------------------------------------------------------------------
 // Function: logEvent
@@ -332,9 +320,7 @@ static void lcdSetPixel(int x, int y, bool on) {
   }
 }
 
-#if !G13_LCD_ANIMATION_ENABLE && \
-    !G13_LCD_PERMANENT_FRAME_ENABLE && \
-    G13_LCD_STATIC_FALLBACK_ENABLE
+#if G13_INTERNAL_LCD_STATIC_FALLBACK_ENABLE
 // -----------------------------------------------------------------------------
 // Function: lcdInvertFramebuffer
 // Purpose:
@@ -570,7 +556,7 @@ static bool queueControlTransfer(LcdControlTransferType type) {
   }
 
   lcdControlPending = LCD_CONTROL_NONE;
-  if (lcdControlAttemptCount >= LCD_MAX_TRANSFER_ATTEMPTS) {
+  if (lcdControlAttemptCount >= G13_LCD_MAX_TRANSFER_ATTEMPTS) {
     if (type == LCD_CONTROL_INIT) {
       logEvent("[G13] LCD init queue error");
       noteLcdError();
@@ -578,7 +564,8 @@ static bool queueControlTransfer(LcdControlTransferType type) {
       finishBacklightFailure("[G13] Backlight queue error");
     }
   } else {
-    lcdControlNextAttemptMs = now + LCD_RETRY_BACKOFF_MS * lcdControlAttemptCount;
+    lcdControlNextAttemptMs =
+      now + G13_LCD_RETRY_BACKOFF_MS * lcdControlAttemptCount;
   }
   return false;
 }
@@ -621,7 +608,7 @@ static bool sendPendingLcdFrame() {
     lcdDirty = false;
   }
 
-  if (now - lcdFrameStartMs > LCD_TRANSFER_TIMEOUT_MS) {
+  if (now - lcdFrameStartMs > G13_LCD_TRANSFER_TIMEOUT_MS) {
     noteLcdError();
     return false;
   }
@@ -655,11 +642,12 @@ static bool sendPendingLcdFrame() {
 
   if (!queued) {
     lcdOutTransferPending = false;
-    if (lcdOutAttemptCount >= LCD_MAX_TRANSFER_ATTEMPTS) {
+    if (lcdOutAttemptCount >= G13_LCD_MAX_TRANSFER_ATTEMPTS) {
       logEvent("[G13] LCD OUT queue error");
       noteLcdError();
     } else {
-      lcdOutNextAttemptMs = now + LCD_RETRY_BACKOFF_MS * lcdOutAttemptCount;
+      lcdOutNextAttemptMs =
+        now + G13_LCD_RETRY_BACKOFF_MS * lcdOutAttemptCount;
     }
   }
 
@@ -916,7 +904,7 @@ static void serviceLcdTransferEvents() {
     lcdTransferOffset += lcdOutPendingLength;
     lcdOutTransferPending = false;
     lcdOutAttemptCount = 0;
-    lcdOutNextAttemptMs = millis() + LCD_CHUNK_INTERVAL_MS;
+    lcdOutNextAttemptMs = millis() + G13_LCD_CHUNK_INTERVAL_MS;
   }
 }
 
@@ -924,7 +912,7 @@ static void serviceLcdTransferTimeouts() {
   const uint32_t now = millis();
 
   if (lcdControlPending != LCD_CONTROL_NONE &&
-      now - lcdControlTransferStartedMs > LCD_CONTROL_TIMEOUT_MS) {
+      now - lcdControlTransferStartedMs > G13_LCD_CONTROL_TIMEOUT_MS) {
     const LcdControlTransferType timedOutType = lcdControlPending;
     lcdControlPending = LCD_CONTROL_NONE;
     if (timedOutType == LCD_CONTROL_INIT) {
@@ -936,7 +924,7 @@ static void serviceLcdTransferTimeouts() {
   }
 
   if (lcdOutTransferPending &&
-      now - lcdOutTransferStartedMs > LCD_OUT_TIMEOUT_MS) {
+      now - lcdOutTransferStartedMs > G13_LCD_OUT_TIMEOUT_MS) {
     lcdOutTransferPending = false;
     logEvent("[G13] LCD OUT timeout");
     noteLcdError();
@@ -1087,13 +1075,13 @@ void updateDisplay() {
 
   switch (lcdBootState) {
     case LCD_WAIT_DRIVER:
-      if (millis() > LCD_STABLE_CLAIM_MS) {
+      if (millis() > G13_LCD_STABLE_CLAIM_MS) {
         logNoDriverOnce();
       }
       return;
 
     case LCD_WAIT_STABLE_CLAIM:
-      if (millis() - lcdStateSinceMs >= LCD_STABLE_CLAIM_MS) {
+      if (millis() - lcdStateSinceMs >= G13_LCD_STABLE_CLAIM_MS) {
         lcdBootState = LCD_SEND_INIT;
       }
       return;
@@ -1119,7 +1107,8 @@ void updateDisplay() {
 
     case LCD_INIT_SETTLE:
       if (millis() - lcdStateSinceMs >= 50) {
-#if G13_LCD_ANIMATION_ENABLE || G13_LCD_PERMANENT_FRAME_ENABLE
+#if G13_INTERNAL_LCD_ANIMATION_ENABLE || \
+    G13_INTERNAL_LCD_PERMANENT_FRAME_ENABLE
         const uint8_t *firstFrame =
           g13StartupAnimationBeginFrame(millis(), lcdTransferActive);
         if (firstFrame) {
@@ -1130,7 +1119,7 @@ void updateDisplay() {
         } else {
           lcdBootState = LCD_READY;
         }
-#elif G13_LCD_STATIC_FALLBACK_ENABLE
+#elif G13_INTERNAL_LCD_STATIC_FALLBACK_ENABLE
         lcdDrawBitmap(logo_g13_m2);
         if (LCD_INVERT_LOGO_FOR_WHITE_ON_BLACK) {
           lcdInvertFramebuffer();
@@ -1167,7 +1156,8 @@ void updateDisplay() {
         lcdBootState = LCD_SEND_SPLASH;
         return;
       }
-#if G13_LCD_ANIMATION_ENABLE || G13_LCD_PERMANENT_FRAME_ENABLE
+#if G13_INTERNAL_LCD_ANIMATION_ENABLE || \
+    G13_INTERNAL_LCD_PERMANENT_FRAME_ENABLE
       {
         const uint8_t *nextFrame = g13StartupAnimationBeginFrame(
           millis(),

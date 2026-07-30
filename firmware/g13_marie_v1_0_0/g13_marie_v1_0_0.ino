@@ -60,11 +60,7 @@ static uint32_t g13_recovered_at = 0;
 // Practical-test note:
 // 5000 ms was chosen as a conservative stall threshold. It should not fire
 // during normal idle time unless the G13 stops producing HID reports entirely.
-static const uint32_t G13_STALL_TIMEOUT_MS = 5000; // 5 Sekunden ohne Report -> Stall
-
-// Grace period used before clearing a previously reported stall. This prevents
-// noisy "recovered" logs from short bursts of resumed reports.
-static const uint32_t G13_RECOVER_GRACE_MS  = 200;
+// The internal thresholds are defined in G13Config.h.
 
 // -----------------------------------------------------------------------------
 // Function: G13_Heartbeat
@@ -153,19 +149,27 @@ static inline void G13_Monitor() {
 // held and allows multiple simultaneous keys to be tracked independently.
 static bool g_pressed[32] = {false};  // Merker je G-Taste (1..22)
 static bool g_keyboard_pressed[32] = {false};
-static uint8_t g_keyboard_pressed_count = 0;
+static uint8_t g_keyboard_pressed_count = 0; // represented distinct keycodes
 
 // The selected Teensy USB keyboard profile exposes the standard six key slots.
 // Additional held G-keys remain in g_pressed and are sent as soon as a slot is
 // released, instead of being marked as transmitted when Keyboard.press() could
 // not represent them.
 static const uint8_t G13_KEYBOARD_ROLLOVER = 6;
-static const uint8_t G13_KEYCODE_BY_NUMBER[23] = {
+static const uint16_t G13_KEYCODE_BY_NUMBER[23] = {
   0,
-  '1', '2', '3', '4', '5', '6', '7', 'k',
-  'l', 'a', 'w', 'd', 'm', 'n', 'o', 'p',
-  's', 'q', 'r', ' ', 'u', 't'
+  G13_KEY_G1,  G13_KEY_G2,  G13_KEY_G3,  G13_KEY_G4,
+  G13_KEY_G5,  G13_KEY_G6,  G13_KEY_G7,  G13_KEY_G8,
+  G13_KEY_G9,  G13_KEY_G10, G13_KEY_G11, G13_KEY_G12,
+  G13_KEY_G13, G13_KEY_G14, G13_KEY_G15, G13_KEY_G16,
+  G13_KEY_G17, G13_KEY_G18, G13_KEY_G19, G13_KEY_G20,
+  G13_KEY_G21, G13_KEY_G22
 };
+
+static_assert(
+  sizeof(G13_KEYCODE_BY_NUMBER) / sizeof(G13_KEYCODE_BY_NUMBER[0]) == 23,
+  "G13 key map must contain the unused zero entry plus G1 through G22"
+);
 
 // Releases every keyboard code held by the Teensy and clears the desired and
 // transmitted per-G-key caches so reconnect starts from a known released state.
@@ -176,16 +180,80 @@ static void releaseG13KeyboardState() {
   g_keyboard_pressed_count = 0;
 }
 
+// Returns true when another represented G-key already holds the same Teensy
+// keycode. This lets users intentionally assign one keyboard key to more than
+// one G-key without releasing it until the final matching G-key is released.
+static bool isG13KeycodeRepresentedByAnother(uint8_t excludedGnum,
+                                              uint16_t keycode) {
+  for (uint8_t gnum = 1; gnum <= 22; gnum++) {
+    if (gnum != excludedGnum &&
+        g_keyboard_pressed[gnum] &&
+        G13_KEYCODE_BY_NUMBER[gnum] == keycode) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static void pressPendingG13Keys() {
-  for (uint8_t gnum = 1;
-       gnum <= 22 && g_keyboard_pressed_count < G13_KEYBOARD_ROLLOVER;
-       gnum++) {
+  for (uint8_t gnum = 1; gnum <= 22; gnum++) {
     if (g_pressed[gnum] && !g_keyboard_pressed[gnum]) {
-      Keyboard.press(G13_KEYCODE_BY_NUMBER[gnum]);
+      const uint16_t keycode = G13_KEYCODE_BY_NUMBER[gnum];
+      if (isG13KeycodeRepresentedByAnother(gnum, keycode)) {
+        g_keyboard_pressed[gnum] = true;
+        continue;
+      }
+      if (g_keyboard_pressed_count >= G13_KEYBOARD_ROLLOVER) {
+        continue;
+      }
+      Keyboard.press(keycode);
       g_keyboard_pressed[gnum] = true;
       g_keyboard_pressed_count++;
     }
   }
+}
+
+// Transfers logical ownership of an already-held keyboard key before any
+// release is sent. This keeps one duplicate-mapped key continuously held when a
+// single HID report releases one G-key and presses another with the same code.
+static void transferRepresentedG13Keycodes() {
+  for (uint8_t oldGnum = 1; oldGnum <= 22; oldGnum++) {
+    if (!g_keyboard_pressed[oldGnum] || g_pressed[oldGnum]) {
+      continue;
+    }
+
+    const uint16_t keycode = G13_KEYCODE_BY_NUMBER[oldGnum];
+    for (uint8_t newGnum = 1; newGnum <= 22; newGnum++) {
+      if (g_pressed[newGnum] &&
+          !g_keyboard_pressed[newGnum] &&
+          G13_KEYCODE_BY_NUMBER[newGnum] == keycode) {
+        g_keyboard_pressed[oldGnum] = false;
+        g_keyboard_pressed[newGnum] = true;
+        break;
+      }
+    }
+  }
+}
+
+static void releaseObsoleteG13Keycodes() {
+  for (uint8_t gnum = 1; gnum <= 22; gnum++) {
+    if (!g_pressed[gnum] && g_keyboard_pressed[gnum]) {
+      const uint16_t keycode = G13_KEYCODE_BY_NUMBER[gnum];
+      g_keyboard_pressed[gnum] = false;
+      if (!isG13KeycodeRepresentedByAnother(gnum, keycode)) {
+        Keyboard.release(keycode);
+        if (g_keyboard_pressed_count > 0) {
+          g_keyboard_pressed_count--;
+        }
+      }
+    }
+  }
+}
+
+static void reconcileG13KeyboardState() {
+  transferRepresentedG13Keycodes();
+  releaseObsoleteG13Keycodes();
+  pressPendingG13Keys();
 }
 
 static void updateG13Key(uint8_t gnum, bool nowPressed) {
@@ -194,13 +262,6 @@ static void updateG13Key(uint8_t gnum, bool nowPressed) {
   }
 
   g_pressed[gnum] = nowPressed;
-  if (!nowPressed && g_keyboard_pressed[gnum]) {
-    Keyboard.release(G13_KEYCODE_BY_NUMBER[gnum]);
-    g_keyboard_pressed[gnum] = false;
-    if (g_keyboard_pressed_count > 0) {
-      g_keyboard_pressed_count--;
-    }
-  }
 }
 
 // -----------------------------------------------------------------------------
@@ -244,30 +305,28 @@ void handle_g13_report(const uint8_t *d, uint32_t len) {
   uint8_t b4 = d[4];
   uint8_t b5 = d[5];
 
-  // Key mapping policy:
-  // "bestehende Belegung" marks mappings that were already known to work.
-  // "Testbelegung" marks temporary unique letters used to verify newly decoded
-  // keys without changing the broader keyboard bridge architecture.
+  // Key assignments are named individually in G13UserConfig.h. Report decoding
+  // stays fixed here so customization cannot alter the proven HID bit layout.
 
   // Byte 3: G1..G8
-  updateG13Key(1,  b3 & 0x01);  // G1  -> '1'  (bestehende Belegung)
-  updateG13Key(2,  b3 & 0x02);  // G2  -> '2'  (bestehende Belegung)
-  updateG13Key(3,  b3 & 0x04);  // G3  -> '3'  (bestehende Belegung)
-  updateG13Key(4,  b3 & 0x08);  // G4  -> '4'  (bestehende Belegung)
-  updateG13Key(5,  b3 & 0x10);  // G5  -> '5'  (bestehende Belegung)
-  updateG13Key(6,  b3 & 0x20);  // G6  -> '6'  (bestehende Belegung)
-  updateG13Key(7,  b3 & 0x40);  // G7  -> '7'  (bestehende Belegung)
-  updateG13Key(8,  b3 & 0x80);  // G8  -> 'k'  (Testbelegung)
+  updateG13Key(1,  b3 & 0x01);
+  updateG13Key(2,  b3 & 0x02);
+  updateG13Key(3,  b3 & 0x04);
+  updateG13Key(4,  b3 & 0x08);
+  updateG13Key(5,  b3 & 0x10);
+  updateG13Key(6,  b3 & 0x20);
+  updateG13Key(7,  b3 & 0x40);
+  updateG13Key(8,  b3 & 0x80);
 
   // Byte 4: G9..G16
-  updateG13Key(9,  b4 & 0x01);  // G9  -> 'l'  (Testbelegung)
-  updateG13Key(10, b4 & 0x02);  // G10 -> 'a'  (bestehende Belegung)
-  updateG13Key(11, b4 & 0x04);  // G11 -> 'w'  (bestehende Belegung)
-  updateG13Key(12, b4 & 0x08);  // G12 -> 'd'  (bestehende Belegung)
-  updateG13Key(13, b4 & 0x10);  // G13 -> 'm'  (Testbelegung)
-  updateG13Key(14, b4 & 0x20);  // G14 -> 'n'  (Testbelegung)
-  updateG13Key(15, b4 & 0x40);  // G15 -> 'o'  (Testbelegung)
-  updateG13Key(16, b4 & 0x80);  // G16 -> 'p'  (Testbelegung)
+  updateG13Key(9,  b4 & 0x01);
+  updateG13Key(10, b4 & 0x02);
+  updateG13Key(11, b4 & 0x04);
+  updateG13Key(12, b4 & 0x08);
+  updateG13Key(13, b4 & 0x10);
+  updateG13Key(14, b4 & 0x20);
+  updateG13Key(15, b4 & 0x40);
+  updateG13Key(16, b4 & 0x80);
 
   // Byte 5: Bits 0..5 = G17..G22, Bit 7 = Statusbit (LIGHT_STATE)
   bool g17_now = b5 & 0x01;
@@ -277,17 +336,17 @@ void handle_g13_report(const uint8_t *d, uint32_t len) {
   bool g21_now = b5 & 0x10;
   bool g22_now = b5 & 0x20;
 
-  updateG13Key(17, g17_now);   // G17 -> 's'          (bestehende Belegung)
-  updateG13Key(18, g18_now);   // G18 -> 'q'          (Testbelegung)
-  updateG13Key(19, g19_now);   // G19 -> 'r'          (Testbelegung)
-  updateG13Key(20, g20_now);   // G20 -> Leertaste    (bestehende Belegung)
-  updateG13Key(21, g21_now);   // G21 -> 'u'          (Testbelegung)
-  updateG13Key(22, g22_now);   // G22 -> 't'          (bestehende Belegung)
+  updateG13Key(17, g17_now);
+  updateG13Key(18, g18_now);
+  updateG13Key(19, g19_now);
+  updateG13Key(20, g20_now);
+  updateG13Key(21, g21_now);
+  updateG13Key(22, g22_now);
 
-  // Promote pending keys only after every bit in this report has been applied.
-  // This avoids briefly pressing a pending key that was released in the same
-  // report in which another keyboard slot became free.
-  pressPendingG13Keys();
+  // Reconcile only after every desired bit from this report has been applied.
+  // This preserves duplicate-key handoffs and promotes pending keys without a
+  // transient release/press glitch.
+  reconcileG13KeyboardState();
 }
 
 // ---------- USB-Host-Struktur (Schicht 1) ----------

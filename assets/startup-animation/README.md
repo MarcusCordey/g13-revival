@@ -35,4 +35,6 @@ python3 tools/png_to_g13.py \
 
 Both scripts use only the Python standard library. See
 [`docs/startup-animation.md`](../../docs/startup-animation.md) for the native
-byte layout, configuration and validation procedure.
+byte layout and asset validation procedure, and
+[`docs/user-configuration.md`](../../docs/user-configuration.md) for theme,
+playback and timing settings.
