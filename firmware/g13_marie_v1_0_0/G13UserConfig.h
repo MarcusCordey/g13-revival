@@ -114,10 +114,10 @@ No warranty is provided. Use at your own risk.
 #define G13_BACKLIGHT_RED   0
 #endif
 #ifndef G13_BACKLIGHT_GREEN
-#define G13_BACKLIGHT_GREEN 0
+#define G13_BACKLIGHT_GREEN 255
 #endif
 #ifndef G13_BACKLIGHT_BLUE
-#define G13_BACKLIGHT_BLUE  255
+#define G13_BACKLIGHT_BLUE  0
 #endif
 
 // -----------------------------------------------------------------------------
