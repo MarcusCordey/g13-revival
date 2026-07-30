@@ -22,10 +22,11 @@ No warranty is provided. Use at your own risk.
 // -----------------------------------------------------------------------------
 // Asset: logo_g13_m2
 // Purpose:
-// Full-screen monochrome bitmap for the Logitech G13 LCD splash screen.
+// Full native-frame monochrome bitmap for the Logitech G13 LCD splash screen.
 //
 // Format:
-// - 960 bytes: 160 columns x 48 rows / 8 vertical pixels per byte.
+// - 160 x 43 visible pixels in a 160 x 48 native, 960-byte framebuffer.
+// - Rows 43 through 47 are non-visible padding.
 // - Byte offset is x + (y / 8) * 160.
 // - Bit (y & 7) selects the vertical pixel inside that byte.
 //

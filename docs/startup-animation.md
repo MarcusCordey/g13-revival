@@ -1,13 +1,15 @@
 # LCD startup animation
 
 The non-blocking animation and permanent signature were introduced in
-`v1.1.0`. Version `v1.2.0` adds a central user configuration and master-theme
-selection without changing the default frames, timing or transfer state
-machine.
+`v1.1.0`. Version `v1.2.0` added a central user configuration and master-theme
+selection. The current unreleased asset correction preserves the story, frame
+order, timing and transfer state machine while re-laying out every image for
+the physical LCD's 160 x 43 visible area.
 
 ## Story and permanent frame
 
-The startup sequence consists of eight ordered 160 x 48 pixel animation frames:
+The startup sequence consists of eight ordered 160 x 43 visible-pixel animation
+frames:
 
 1. `MARIE INSIDE` opens the technical boot sequence.
 2. Marie appears as a friendly microchip waking up with large pixel eyes.
@@ -24,12 +26,16 @@ clipped-corner `M² inside` technology emblem; the right side reads `Powered by
 Marie`. It does not reproduce an Intel logo, World of Warcraft artwork or any
 other third-party logo.
 
-The source PNGs are in `assets/startup-animation/frames/`. The permanent
-signature uses a `permanent_` filename rather than a `frame_09_` prefix so that
-it cannot be mistaken for part of the repeatable story.
+The 160 x 43 source PNGs are in `assets/startup-animation/frames/`. The
+permanent signature uses a `permanent_` filename rather than a `frame_09_`
+prefix so that it cannot be mistaken for part of the repeatable story. Each
+scene and the permanent signature were individually re-laid out for the 43-row
+visible area; the revised sources are not merely bottom-cropped versions of the
+previous 48-row canvases.
 
 Every source has a separate, unsmoothed 4x preview in
-`assets/startup-animation/preview/frames/`. The complete 3x3 contact sheet is:
+`assets/startup-animation/preview/frames/`. Each preview is 640 x 172 pixels.
+The complete 1984 x 652 pixel 3x3 contact sheet is:
 
 ```text
 assets/startup-animation/preview/startup_animation_contact_sheet_4x.png
@@ -46,28 +52,38 @@ python3 tools/generate_startup_animation.py
 It uses only the Python standard library and writes no antialiasing, grayscale
 or dithered pixels.
 
-## Native G13 frame format
+## Visible image and native G13 frame format
 
-The converter follows the byte order already used by the working LCD pixel
-routine:
+The physical G13 GamePanel LCD exposes 160 x 43 visible pixels. The USB
+protocol nevertheless stores a frame in six complete banks of eight vertical
+bit positions, so its native transfer layout is 160 x 48 bits and 960 bytes.
+The converter embeds each visible source in that native layout and leaves
+`y=43` through `y=47` clear:
 
 ```text
-width              160 pixels
-height              48 pixels
-pages                6 groups of 8 vertical pixels
-frame size         960 bytes
-byte offset        x + (y / 8) * 160
-bit within byte    y & 7
-set bit              white/on pixel
+visible width            160 pixels
+visible height            43 pixels
+native storage width     160 columns
+native storage height     48 bit rows
+pages                       6 groups of 8 vertical bits
+native frame size         960 bytes
+byte offset              x + (y / 8) * 160
+bit within byte          y & 7
+set bit                    white/on pixel
+padding                  y=43 through y=47, all clear
 ```
 
-The LCD USB payload adds the existing 32-byte header in front of these 960
-bytes. Header byte 0 is `0x03`; the other header bytes remain zero.
+The LCD USB payload is unchanged: it adds the existing 32-byte header in front
+of the 960-byte native frame for a total of 992 bytes. Header byte 0 is `0x03`;
+the other header bytes remain zero. The visible-geometry correction therefore
+does not change the USB transfer size, framing, timing or state machine.
 
 `tools/png_to_g13.py` validates PNG chunks, CRCs, dimensions and modes. Strict
 mode accepts only opaque pure black and white; non-strict mode can
 deterministically threshold supported grayscale, indexed, RGB and alpha PNGs.
-It can emit C or C++ arrays:
+The normal source size is 160 x 43. A 160 x 48 compatibility source is accepted
+only when all five non-visible padding rows are clear. The tool can emit C or
+C++ arrays:
 
 ```sh
 python3 tools/png_to_g13.py FRAME.png --strict-monochrome --language cpp
@@ -75,16 +91,17 @@ python3 tools/png_to_g13.py FRAME.png --strict-monochrome --language c
 ```
 
 The complete nine-file conversion command is in
-`assets/startup-animation/README.md`. Each generated array contains exactly 960
-bytes. On Teensy 4.x the immutable arrays and their pointer table use the core's
-`PROGMEM` section in memory-mapped flash.
+`assets/startup-animation/README.md`. Each generated array still contains
+exactly 960 bytes even though its source has only 43 visible rows. On Teensy
+4.x the immutable arrays and their pointer table use the core's `PROGMEM`
+section in memory-mapped flash.
 
 ## Timing and transfer behavior
 
 `G13StartupAnimation` owns only a small timeline; it does not own image buffers.
-The existing 992-byte USB transfer buffer receives one selected flash frame
-when that transfer begins. There is no runtime image conversion, allocation or
-additional full-frame RAM cache.
+The existing 992-byte USB transfer buffer consists of its 32-byte header
+followed by one selected 960-byte native flash frame. There is no runtime image
+conversion, allocation or additional full-frame RAM cache.
 
 Visibility timing starts only after all chunks of the preceding LCD frame have
 completed successfully:
@@ -163,10 +180,10 @@ of immutable native image data. This is only 1920 bytes more than the preceding
 seven-frame implementation, so compression would add complexity without a
 useful Teensy 4.1 resource benefit.
 
-The previous static image remains a 960-byte source asset, but it is excluded
+The previous static image remains a 960-byte native asset, but it is excluded
 from the standard animation build by compile-time guards. The existing runtime
-buffers remain one 960-byte logical framebuffer and one 992-byte USB payload
-buffer.
+buffers remain one 960-byte native transfer framebuffer and one 992-byte USB
+payload buffer.
 
 Using the build environment documented in `installation.md`:
 
@@ -192,14 +209,15 @@ c++ -std=c++17 -Wall -Wextra -Werror \
 /tmp/test_g13_animation_timeline
 ```
 
-Python discovery passed 14 of 14 tests, including all four user-configuration
-tests. These verify all nine source modes and sizes, each 960-byte native array,
-the explicit frame order, native pixel mapping, exact 4x previews,
-deterministic regeneration, default key/color/timing values, all three master
-themes, supported overrides and targeted invalid-value errors. The strict C++
-test verifies normal/special/READY timing, transfer exclusion, one-time
+The recorded `v1.2.0` validation passed 14 of 14 Python tests, including all
+four user-configuration tests. For the unreleased geometry correction, the
+asset tests cover 160 x 43 sources, zero padding in each 960-byte native array,
+the explicit frame order, native pixel mapping, exact 640 x 172 previews, the
+1984 x 652 contact sheet and deterministic regeneration. The strict C++ test
+covers normal/special/READY timing, transfer exclusion, one-time
 permanent-frame scheduling, repeat behavior, reset/reconnect behavior and
-`millis()` wraparound.
+`millis()` wraparound. These host-side checks do not constitute physical
+hardware validation.
 
 ## Hardware validation
 
@@ -218,4 +236,6 @@ is maintained in [`hardware-validation.md`](hardware-validation.md).
 No `v1.2.0` build was uploaded to the Teensy or tested with the physical G13 in
 this development step. The unchanged default timeline, `STATIC` and `NONE`
 themes, custom timing and the new configuration path therefore still require
-physical validation.
+physical validation. The unreleased 160 x 43 source re-layout and regenerated
+native frames likewise have not been uploaded to a Teensy or tested on a
+physical G13.

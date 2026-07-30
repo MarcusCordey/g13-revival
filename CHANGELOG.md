@@ -4,6 +4,28 @@ All notable project changes will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Corrected the LCD geometry throughout the startup-animation documentation and
+  asset pipeline: the physical G13 exposes 160 x 43 visible pixels, while its
+  native transfer frame remains 160 x 48 bit positions in six 8-row vertical
+  banks, or 960 bytes, with clear padding at `y=43` through `y=47`.
+- Re-laid out all eight story frames and the permanent signature individually
+  as 160 x 43 1-bit sources instead of bottom-cropping the previous canvases.
+
+### Changed
+
+- Regenerated each unsmoothed 4x frame preview at 640 x 172 pixels and the 3x3
+  contact sheet at 1984 x 652 pixels.
+- Kept the LCD protocol and runtime transfer shape unchanged at a 32-byte header
+  plus a 960-byte native frame, totaling 992 bytes.
+
+### Hardware validation
+
+- The corrected 160 x 43 sources and regenerated native frames have not been
+  uploaded to a Teensy or tested on a physical Logitech G13. The earlier
+  `v1.1.0` hardware results do not validate this unreleased asset re-layout.
+
 ## [1.2.0] - 2026-07-30
 
 ### Added
@@ -59,8 +81,9 @@ All notable project changes will be documented in this file.
 
 ### Added
 
-- Added eight deterministic 160 x 48 pixel, 1-bit story frames, a separate
-  permanent signature frame, individual 4x previews and a contact sheet.
+- Added eight deterministic 160 x 48 native-frame, 1-bit story assets, a
+  separate permanent signature frame, individual 4x previews and a contact
+  sheet.
 - Added a standard-library PNG converter for the native 960-byte G13 frame
   layout and host-side conversion/timeline tests.
 - Added a non-blocking, completion-gated, `millis()`-driven startup story in
@@ -107,8 +130,8 @@ All notable project changes will be documented in this file.
 - Keyboard output continues to use the existing six-key rollover profile.
 - A diagnostic HID stall is deliberately not treated as proof of disconnect and
   does not release keys automatically.
-- The animation is specifically optimized for the monochrome 160 x 48 pixel G13
-  display.
+- The physical G13 LCD exposes 160 x 43 visible pixels; firmware stores each
+  image in its 160 x 48 native transfer-frame layout.
 - No copyrighted World of Warcraft graphics or logos are included.
 
 ### Hardware validation

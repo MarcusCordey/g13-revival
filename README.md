@@ -24,8 +24,10 @@ remains `v1.1.0`.
 - a central
   [`G13UserConfig.h`](firmware/g13_marie_v1_0_0/G13UserConfig.h) for normal
   key, backlight, LCD-theme and animation customization;
-- LCD initialization, an eight-frame 160 x 48 pixel Marie/Latte-Overclock
-  startup story and the permanent `M² inside | Powered by Marie` frame;
+- LCD initialization, an eight-frame Marie/Latte-Overclock startup story and
+  the permanent `M² inside | Powered by Marie` frame, authored for the G13's
+  160 x 43 visible LCD area and converted to its native 160 x 48, 960-byte
+  transfer layout;
 - user-configurable RGB/key-backlight initialization used by the LCD startup
   path;
 - event-based USB and HID diagnostics;
@@ -98,7 +100,7 @@ firmware/g13_marie_v1_0_0/G13UserConfig.h  Normal user customization
 firmware/SHA256SUMS-v1.0.0.txt  Fingerprints of the published v1.0.0 baseline
 firmware/SHA256SUMS-v1.1.0.txt  Historical v1.1.0 firmware fingerprints
 firmware/SHA256SUMS-v1.2.0.txt  Fingerprints of the v1.2.0 firmware directory
-assets/startup-animation/   Ordered 1-bit source frames and enlarged preview
+assets/startup-animation/   Ordered 160 x 43 1-bit sources and enlarged preview
 tools/                      Reproducible asset generation and conversion tools
 tests/                      Host-side configuration, asset and timeline tests
 docs/                       Hardware, installation and operating documentation

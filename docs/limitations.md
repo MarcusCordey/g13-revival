@@ -17,8 +17,12 @@ The following limitations apply to `v1.2.0`:
 - The LCD master theme, Marie/Latte behavior and timing are compile-time
   settings. There is no runtime theme switching or application-facing dynamic
   display protocol.
-- The animation is designed specifically for the G13's monochrome 160 x 48
-  display. It contains no copyrighted World of Warcraft graphics or logos.
+- The physical G13 LCD exposes a monochrome 160 x 43 visible area. Animation
+  sources use that visible geometry, while USB transfer still uses the native
+  160 x 48, 960-byte layout with six 8-row vertical banks and clear padding at
+  `y=43` through `y=47`. The unreleased source re-layout has not been validated
+  on physical hardware. It contains no copyrighted World of Warcraft graphics
+  or logos.
 - RGB values are user-configurable, but the report is based on the earlier G13
   reference implementation. Its exact physical lighting target may vary between
   global/key and LCD-associated illumination.

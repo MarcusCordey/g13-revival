@@ -67,7 +67,7 @@ against the following khampf/g13 files:
 
 - `g13_lcd.cpp` and `g13_lcd.hpp`
   - LCD initialization control request
-  - 160 x 48 monochrome framebuffer
+  - 160 x 43 visible pixels in a 160 x 48 monochrome native transfer framebuffer
   - 960-byte framebuffer size
   - 32-byte transfer header
   - header byte `0x03`
@@ -104,4 +104,3 @@ board package.
 Logitech and Logitech product names are used only for compatibility and
 technical identification. G13 Revival is not affiliated with, endorsed by or
 sponsored by Logitech, PJRC or the third-party projects named above.
-

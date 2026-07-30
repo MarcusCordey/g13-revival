@@ -29,12 +29,14 @@ static const uint8_t G13_ANIMATION_FRAME_COUNT = 8;
 static const uint8_t G13_PERMANENT_FRAME_INDEX = 8;
 static const uint8_t G13_LATTE_OVERCLOCK_FRAME_INDEX = 5;
 
-static_assert(g13_startup_animation_width == 160,
-              "G13 animation frames must be 160 pixels wide");
-static_assert(g13_startup_animation_height == 48,
-              "G13 animation frames must be 48 pixels high");
+static_assert(g13_startup_animation_visible_width == 160,
+              "G13 animation frames must be 160 visible pixels wide");
+static_assert(g13_startup_animation_visible_height == 43,
+              "G13 animation frames must be 43 visible pixels high");
+static_assert(g13_startup_animation_native_height == 48,
+              "G13 animation native storage must remain 48 pixels high");
 static_assert(g13_startup_animation_frame_bytes == 960,
-              "G13 animation frames must contain 960 bytes");
+              "G13 animation native frames must contain 960 bytes");
 static_assert(g13_startup_animation_count ==
                 G13_ANIMATION_FRAME_COUNT + 1,
               "G13 startup assets must contain 8 animation frames "

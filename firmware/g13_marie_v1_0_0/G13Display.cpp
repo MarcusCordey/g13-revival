@@ -35,8 +35,11 @@ No warranty is provided. Use at your own risk.
 // Confirmed from g13-master and hardware-oriented experiments:
 // - The G13 LCD accepts a control request before bitmap transfer:
 //   bmRequestType=0x00, bRequest=0x09, wValue=0x0001, wIndex=0x0000.
-// - LCD frames use a 32-byte USB payload header followed by 960 framebuffer
-//   bytes. Header byte 0 is 0x03; the remaining header bytes are zero.
+// - The LCD has 160x43 visible pixels stored in a 160x48 native framebuffer.
+//   Rows 43..47 are padding.
+// - LCD frames use a 32-byte USB payload header followed by the unchanged
+//   960-byte native framebuffer. Header byte 0 is 0x03; the remaining header
+//   bytes are zero.
 // - The framebuffer is monochrome. Color, if available, is separate lighting,
 //   not per-pixel color.
 //
@@ -47,16 +50,29 @@ No warranty is provided. Use at your own risk.
 //   992-byte LCD frame is sent in chunks no larger than outSize().
 // -----------------------------------------------------------------------------
 // LCD/backlight protocol values verified against g13-master:
-// - g13_lcd.cpp / g13_lcd.hpp: LCD init, endpoint payload header, 960 byte framebuffer
+// - g13_lcd.cpp / g13_lcd.hpp: LCD init, endpoint payload header, 960-byte
+//   native framebuffer
 // - g13_device.cpp: class requests for key backlight color
 static const uint16_t G13_VENDOR_ID = 0x046d;
 static const uint16_t G13_PRODUCT_ID = 0xc21c;
 
-static const uint16_t LCD_WIDTH = 160;
-static const uint16_t LCD_HEIGHT = 48;
-static const uint16_t LCD_FRAMEBUFFER_SIZE = 960;
+static const uint16_t LCD_VISIBLE_WIDTH = 160;
+static const uint16_t LCD_VISIBLE_HEIGHT = 43;
+static const uint16_t LCD_NATIVE_HEIGHT = 48;
+static const uint16_t LCD_NATIVE_FRAME_SIZE =
+  LCD_VISIBLE_WIDTH * LCD_NATIVE_HEIGHT / 8;
 static const uint16_t LCD_TRANSFER_HEADER_SIZE = 32;
-static const uint16_t LCD_TRANSFER_SIZE = LCD_TRANSFER_HEADER_SIZE + LCD_FRAMEBUFFER_SIZE;
+static const uint16_t LCD_TRANSFER_SIZE =
+  LCD_TRANSFER_HEADER_SIZE + LCD_NATIVE_FRAME_SIZE;
+static const uint16_t LCD_LAST_NATIVE_PAGE_OFFSET =
+  (LCD_NATIVE_HEIGHT / 8 - 1) * LCD_VISIBLE_WIDTH;
+static const uint8_t LCD_LAST_PAGE_VISIBLE_MASK =
+  (1u << (LCD_VISIBLE_HEIGHT % 8)) - 1u;
+
+static_assert(LCD_NATIVE_FRAME_SIZE == 960,
+              "G13 native framebuffer must remain exactly 960 bytes");
+static_assert(LCD_TRANSFER_SIZE == 992,
+              "G13 USB LCD payload must remain exactly 992 bytes");
 
 // Das G13-LCD bekommt nur ein monochromes 1-Bit-Bitmap; Farbe kommt, soweit
 // das Geraet sie akzeptiert, ueber die separate Hintergrundbeleuchtung.
@@ -91,10 +107,11 @@ static volatile uint32_t pendingControlCompletionGeneration = 0;
 static volatile uint32_t pendingOutCompletionGeneration = 0;
 
 // Framebuffer storage:
-// lcdFramebuffer is the logical 160x48 monochrome image.
+// lcdFramebuffer stores 160x43 visible pixels in a zero-padded 160x48 native
+// frame. Rows 43..47 are never visible.
 // lcdTransferFrame is the exact USB payload: 32-byte header + framebuffer.
 // The alignment is intentional for Teensy 4.x USB/cache behavior.
-static uint8_t lcdFramebuffer[LCD_FRAMEBUFFER_SIZE] __attribute__((aligned(32)));
+static uint8_t lcdFramebuffer[LCD_NATIVE_FRAME_SIZE] __attribute__((aligned(32)));
 static uint8_t lcdTransferFrame[LCD_TRANSFER_SIZE] __attribute__((aligned(32)));
 
 // Five-byte class report used for G13 RGB lighting:
@@ -295,7 +312,7 @@ static void noteLcdError() {
 // -----------------------------------------------------------------------------
 // Function: lcdSetPixel
 // Purpose:
-// Sets or clears one pixel in the local 160x48 monochrome framebuffer.
+// Sets or clears one of the 160x43 visible pixels in the local framebuffer.
 //
 // Input:
 // x, y - pixel coordinates
@@ -306,11 +323,12 @@ static void noteLcdError() {
 // bit (y & 7) selects the pixel row within that vertical byte.
 // -----------------------------------------------------------------------------
 static void lcdSetPixel(int x, int y, bool on) {
-  if (x < 0 || x >= LCD_WIDTH || y < 0 || y >= LCD_HEIGHT) {
+  if (x < 0 || x >= LCD_VISIBLE_WIDTH ||
+      y < 0 || y >= LCD_VISIBLE_HEIGHT) {
     return;
   }
 
-  const uint16_t offset = x + (y / 8) * LCD_WIDTH;
+  const uint16_t offset = x + (y / 8) * LCD_VISIBLE_WIDTH;
   const uint8_t mask = 1 << (y & 7);
 
   if (on) {
@@ -332,7 +350,7 @@ static void lcdSetPixel(int x, int y, bool on) {
 // the asset unchanged and documents the hardware/display polarity assumption.
 // -----------------------------------------------------------------------------
 static void lcdInvertFramebuffer() {
-  for (uint16_t i = 0; i < LCD_FRAMEBUFFER_SIZE; i++) {
+  for (uint16_t i = 0; i < LCD_NATIVE_FRAME_SIZE; i++) {
     lcdFramebuffer[i] = ~lcdFramebuffer[i];
   }
 }
@@ -351,15 +369,24 @@ static void lcdInvertFramebuffer() {
 // This is a visual compromise, not true color rendering.
 // -----------------------------------------------------------------------------
 static void lcdDitherInactiveBackground() {
-  for (uint16_t y = 0; y < LCD_HEIGHT; y++) {
-    for (uint16_t x = 0; x < LCD_WIDTH; x++) {
-      const uint16_t offset = x + (y / 8) * LCD_WIDTH;
+  for (uint16_t y = 0; y < LCD_VISIBLE_HEIGHT; y++) {
+    for (uint16_t x = 0; x < LCD_VISIBLE_WIDTH; x++) {
+      const uint16_t offset = x + (y / 8) * LCD_VISIBLE_WIDTH;
       const uint8_t mask = 1 << (y & 7);
 
       if ((lcdFramebuffer[offset] & mask) == 0 && (((x + y) & 0x03) == 0)) {
         lcdFramebuffer[offset] |= mask;
       }
     }
+  }
+}
+
+// Restores the invariant that native rows 43..47 are blank after transformations
+// such as inversion. This changes no visible pixel and no transfer size.
+static void lcdClearNativePadding() {
+  for (uint16_t x = 0; x < LCD_VISIBLE_WIDTH; x++) {
+    lcdFramebuffer[LCD_LAST_NATIVE_PAGE_OFFSET + x] &=
+      LCD_LAST_PAGE_VISIBLE_MASK;
   }
 }
 #endif
@@ -596,7 +623,7 @@ static bool sendPendingLcdFrame() {
       : lcdFramebuffer;
     memcpy(lcdTransferFrame + LCD_TRANSFER_HEADER_SIZE,
            sourceFrame,
-           LCD_FRAMEBUFFER_SIZE);
+           LCD_NATIVE_FRAME_SIZE);
 
     lcdTransferOffset = 0;
     lcdFrameStartMs = now;
@@ -995,19 +1022,19 @@ void lcdClear() {
 // -----------------------------------------------------------------------------
 // Function: lcdDrawBitmap
 // Purpose:
-// Copies a full-screen 960-byte G13 bitmap into the local framebuffer.
+// Copies a full native-frame 960-byte G13 bitmap into the local framebuffer.
 //
 // Input:
-// bitmap - pointer to framebuffer data in the G13 160x48 packed format.
+// bitmap - pointer to 160x48 native packed data for the 160x43 visible LCD.
 //
 // Limitation:
-// No size argument is provided. Callers must pass a valid full-screen bitmap.
+// No size argument is provided. Callers must pass a valid native-frame bitmap.
 // -----------------------------------------------------------------------------
 void lcdDrawBitmap(const uint8_t *bitmap) {
   if (!bitmap) {
     return;
   }
-  memcpy(lcdFramebuffer, bitmap, LCD_FRAMEBUFFER_SIZE);
+  memcpy(lcdFramebuffer, bitmap, LCD_NATIVE_FRAME_SIZE);
 }
 
 // -----------------------------------------------------------------------------
@@ -1127,6 +1154,7 @@ void updateDisplay() {
         if (LCD_DITHER_LOGO_BACKGROUND_FOR_BACKLIGHT) {
           lcdDitherInactiveBackground();
         }
+        lcdClearNativePadding();
         lcdUpdate();
         lcdBootState = LCD_SEND_SPLASH;
 #else

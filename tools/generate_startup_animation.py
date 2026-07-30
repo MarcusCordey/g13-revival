@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate deterministic 160x48 monochrome G13 startup-animation PNGs."""
+"""Generate deterministic 160x43 visible G13 startup-animation PNGs."""
 
 from __future__ import annotations
 
@@ -8,11 +8,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
 
-from png_to_g13 import write_one_bit_png
+from png_to_g13 import (
+    G13_VISIBLE_HEIGHT,
+    G13_VISIBLE_WIDTH,
+    write_one_bit_png,
+)
 
 
-WIDTH = 160
-HEIGHT = 48
+VISIBLE_WIDTH = G13_VISIBLE_WIDTH
+VISIBLE_HEIGHT = G13_VISIBLE_HEIGHT
 
 
 FONT = {
@@ -74,8 +78,8 @@ LOWER_FONT = {
 
 @dataclass
 class Canvas:
-    width: int = WIDTH
-    height: int = HEIGHT
+    width: int = VISIBLE_WIDTH
+    height: int = VISIBLE_HEIGHT
 
     def __post_init__(self) -> None:
         self.pixels = [False] * (self.width * self.height)
@@ -167,12 +171,12 @@ def text_width(text: str, scale: int = 1) -> int:
 
 
 def draw_border(canvas: Canvas) -> None:
-    canvas.line(5, 3, 154, 3, 1)
-    canvas.line(5, 44, 154, 44, 1)
-    canvas.rect(2, 1, 4, 5)
-    canvas.rect(154, 1, 4, 5)
-    canvas.rect(2, 42, 4, 5)
-    canvas.rect(154, 42, 4, 5)
+    canvas.line(5, 2, 154, 2, 1)
+    canvas.line(5, 40, 154, 40, 1)
+    canvas.rect(2, 1, 4, 4)
+    canvas.rect(154, 1, 4, 4)
+    canvas.rect(2, 38, 4, 4)
+    canvas.rect(154, 38, 4, 4)
 
 
 def draw_chip_body(
@@ -279,13 +283,13 @@ def draw_ordered_traces(canvas: Canvas, left: int, top: int) -> None:
 def frame_marie_inside() -> Canvas:
     canvas = Canvas()
     draw_border(canvas)
-    canvas.centered_text(17, "MARIE INSIDE", 2)
+    canvas.centered_text(15, "MARIE INSIDE", 2)
     return canvas
 
 
 def frame_marie_wakes() -> Canvas:
     canvas = Canvas()
-    draw_marie_chip(canvas, 58, 9)
+    draw_marie_chip(canvas, 58, 8)
     canvas.line(57, 4, 53, 1, 2)
     canvas.line(80, 4, 80, 0, 2)
     canvas.line(103, 4, 107, 1, 2)
@@ -294,37 +298,37 @@ def frame_marie_wakes() -> Canvas:
 
 def frame_latte_arrives() -> Canvas:
     canvas = Canvas()
-    draw_marie_chip(canvas, 24, 9, look_right=True)
-    draw_cup(canvas, 119, 21)
-    canvas.line(153, 25, 158, 25, 2)
-    canvas.line(151, 31, 158, 31, 2)
-    canvas.line(153, 37, 158, 37, 2)
+    draw_marie_chip(canvas, 24, 8, look_right=True)
+    draw_cup(canvas, 119, 20)
+    canvas.line(153, 24, 158, 24, 2)
+    canvas.line(151, 30, 158, 30, 2)
+    canvas.line(153, 36, 158, 36, 2)
     return canvas
 
 
 def frame_marie_drinks() -> Canvas:
     canvas = Canvas()
-    draw_marie_chip(canvas, 24, 9, eye_mode="wide", look_right=True)
-    draw_cup(canvas, 111, 21)
-    canvas.line(111, 29, 99, 29, 2)
-    canvas.line(99, 29, 89, 22, 2)
-    canvas.line(89, 22, 73, 22, 2)
-    canvas.rect(92, 25, 5, 5)
-    canvas.rect(80, 20, 5, 5)
+    draw_marie_chip(canvas, 24, 8, eye_mode="wide", look_right=True)
+    draw_cup(canvas, 111, 20)
+    canvas.line(111, 28, 99, 28, 2)
+    canvas.line(99, 28, 89, 21, 2)
+    canvas.line(89, 21, 73, 21, 2)
+    canvas.rect(92, 24, 5, 5)
+    canvas.rect(80, 19, 5, 5)
     return canvas
 
 
 def frame_overclock_chaos() -> Canvas:
     canvas = Canvas()
-    draw_marie_chip(canvas, 58, 9, eye_mode="crazy")
+    draw_marie_chip(canvas, 58, 8, eye_mode="crazy")
 
     left_paths = (
-        ((53, 14), (43, 14), (36, 8), (24, 8)),
-        ((53, 24), (42, 24), (33, 31), (19, 31)),
+        ((53, 13), (43, 13), (36, 8), (24, 8)),
+        ((53, 23), (42, 23), (33, 30), (19, 30)),
     )
     right_paths = (
-        ((107, 17), (118, 17), (126, 10), (140, 10)),
-        ((107, 29), (119, 29), (128, 37), (143, 37)),
+        ((107, 16), (118, 16), (126, 10), (140, 10)),
+        ((107, 28), (119, 28), (128, 36), (143, 36)),
     )
     for points in left_paths + right_paths:
         for start, end in zip(points, points[1:]):
@@ -333,8 +337,8 @@ def frame_overclock_chaos() -> Canvas:
     for points in (
         ((11, 3), (18, 11), (13, 11), (22, 21)),
         ((148, 2), (141, 11), (147, 11), (139, 21)),
-        ((8, 28), (16, 34), (11, 35), (20, 45)),
-        ((151, 27), (143, 34), (149, 35), (140, 45)),
+        ((8, 27), (16, 33), (11, 34), (20, 41)),
+        ((151, 26), (143, 33), (149, 34), (140, 41)),
     ):
         for start, end in zip(points, points[1:]):
             canvas.line(*start, *end, 2)
@@ -356,8 +360,8 @@ def frame_latte_overclock() -> Canvas:
 
 def frame_marie_stable() -> Canvas:
     canvas = Canvas()
-    draw_ordered_traces(canvas, 58, 9)
-    draw_marie_chip(canvas, 58, 9)
+    draw_ordered_traces(canvas, 58, 8)
+    draw_marie_chip(canvas, 58, 8)
     return canvas
 
 
@@ -386,19 +390,19 @@ def permanent_signature() -> Canvas:
     # swoosh associated with an existing "inside" brand.
     canvas.line(8, 2, 68, 2, 2)
     canvas.line(68, 2, 76, 10, 2)
-    canvas.line(76, 10, 76, 39, 2)
-    canvas.line(76, 39, 69, 46, 2)
-    canvas.line(69, 46, 8, 46, 2)
-    canvas.line(8, 46, 2, 40, 2)
-    canvas.line(2, 40, 2, 9, 2)
+    canvas.line(76, 10, 76, 34, 2)
+    canvas.line(76, 34, 69, 41, 2)
+    canvas.line(69, 41, 8, 41, 2)
+    canvas.line(8, 41, 2, 35, 2)
+    canvas.line(2, 35, 2, 9, 2)
     canvas.line(2, 9, 8, 2, 2)
 
     canvas.text(22, 7, "M", 4)
     draw_superscript_two(canvas, 45, 4, 2)
-    canvas.text_case(20, 37, "inside", 1)
+    canvas.text_case(20, 32, "inside", 1)
 
     canvas.text_case(93, 8, "Powered by", 1)
-    canvas.text_case(93, 25, "Marie", 2)
+    canvas.text_case(93, 24, "Marie", 2)
     return canvas
 
 
@@ -446,8 +450,8 @@ def build_contact_sheet(
 ) -> Canvas:
     columns = 3
     rows = (len(frames) + columns - 1) // columns
-    panel_width = WIDTH * scale
-    panel_height = HEIGHT * scale
+    panel_width = VISIBLE_WIDTH * scale
+    panel_height = VISIBLE_HEIGHT * scale
     label_height = 24
     padding = 16
     sheet = Canvas(
@@ -463,9 +467,9 @@ def build_contact_sheet(
         sheet.text(origin_x, origin_y, spec.label, 2)
         image_y = origin_y + label_height
         sheet.rect(origin_x - 2, image_y - 2, panel_width + 4, panel_height + 4, False)
-        for y in range(HEIGHT):
-            for x in range(WIDTH):
-                if frame.pixels[y * WIDTH + x]:
+        for y in range(VISIBLE_HEIGHT):
+            for x in range(VISIBLE_WIDTH):
+                if frame.pixels[y * VISIBLE_WIDTH + x]:
                     sheet.rect(
                         origin_x + x * scale,
                         image_y + y * scale,
@@ -509,7 +513,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     for spec in ANIMATION_FRAME_SPECS + (PERMANENT_FRAME_SPEC,):
         canvas = spec.builder()
         destination = args.output_dir / spec.filename
-        write_one_bit_png(destination, WIDTH, HEIGHT, canvas.pixels)
+        write_one_bit_png(
+            destination,
+            VISIBLE_WIDTH,
+            VISIBLE_HEIGHT,
+            canvas.pixels,
+        )
         preview = scale_canvas(canvas, 4)
         preview_destination = args.preview_dir / f"{Path(spec.filename).stem}_4x.png"
         write_one_bit_png(
